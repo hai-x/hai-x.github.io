@@ -1,0 +1,235 @@
+<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" href="/_next/static/media/a34f9d1faa5f3315-s.p.woff2" as="font" crossorigin="" type="font/woff2"/><link rel="preload" as="image" href="/assets/the-core-of-turbopack-explained/image.png"/><link rel="preload" as="image" href="/assets/the-core-of-turbopack-explained/image-1.png"/><link rel="preload" as="image" href="/assets/the-core-of-turbopack-explained/image-2.png"/><link rel="preload" as="image" href="/assets/the-core-of-turbopack-explained/image-3.png"/><link rel="stylesheet" href="/_next/static/css/2eb10676cf259d3f.css" crossorigin="" data-precedence="next"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/webpack-d36e14b784de5f6e.js" crossorigin=""/><script src="/_next/static/chunks/d6288917-d505d90c8a1f4707.js" async="" crossorigin=""></script><script src="/_next/static/chunks/218-11f27f92c01c2460.js" async="" crossorigin=""></script><script src="/_next/static/chunks/main-app-5a13162e01b2e9a2.js" async="" crossorigin=""></script><script src="/_next/static/chunks/38-0d0b6016ca49ae6e.js" async=""></script><script src="/_next/static/chunks/app/layout-16840075a6656106.js" async=""></script><script src="/_next/static/chunks/app/page-f363a9acb0006aec.js" async=""></script><title>The core of Turbopack explained</title><meta name="description" content="The core of Turbopack explained"/><meta name="next-size-adjust"/><title>hai-x</title><script src="/_next/static/chunks/polyfills-c67a75d1b6f99dc8.js" crossorigin="" noModule=""></script></head><body><script>((e,t,r,a,o,l,u,i)=>{let s=document.documentElement,c=["light","dark"];function p(t){(Array.isArray(e)?e:[e]).forEach(e=>{let r="class"===e,a=r&&l?o.map(e=>l[e]||e):o;r?(s.classList.remove(...a),s.classList.add(t)):s.setAttribute(e,t)}),i&&c.includes(t)&&(s.style.colorScheme=t)}if(a)p(a);else try{let e=localStorage.getItem(t)||r,a=u&&"system"===e?window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light":e;p(a)}catch(e){}})("class","theme","system",null,["light","dark"],null,true,true)</script><div class="antialiased min-h-screen bg-white text-slate-900 __className_d65c78"><div class="max-w-2xl mx-auto py-10 px-4"><header><div class="flex items-center justify-between"><div class="w-6 h-6"></div><nav class="ml-auto text-sm font-medium space-x-6"><a href="/">Home</a><a href="/about">About</a></nav></div></header><main><article class="py-6 prose dark:prose-invert"><h1 class="mb-4 break-all">The core of Turbopack explained</h1><p class="text-slate-700">The core of Turbopack explained</p><hr class="my-6"/><h2>简述</h2>
+<blockquote>
+<p>来源： webpack 作者 Tobias Koppers 在 JS Nation
+JSNation 2023 上的 coding live 作品
+<a href="https://portal.gitnation.org/contents/the-core-of-turbopack-explained-live-coding">The Core of Turbopack Explained (Live Coding)</a></p>
+</blockquote>
+<blockquote>
+<p>目的：解决 webpack 因大量查找缓存、验证失效缓存导致的开销过大问题</p>
+</blockquote>
+<p>本文章通过模拟一个最简构建过程来初探 Turbo Engine 的一些原理。</p>
+<h2>如何工作</h2>
+<p>Turbo Engine 会将某些功能标记为<em>To be remember</em>。当这些函数被调用时，它会记住它们被调用的内容以及它们返回的内容。然后它将其保存在缓存中。</p>
+<p>一个简单的 bundle 过程可以描述为读取源码，对源码进行构建，拼接构建产物形成最终产物 如下所示</p>
+<img src="/assets/the-core-of-turbopack-explained/image.png" alt="图出自 Turbopack 官网"/>
+<p>修改 <code>sdk.ts</code> 的代码时，我们需要再次构建，再次拼接产物。此时，对于 <code>api.ts</code> 文件并未改动，我们将从缓存中读取 <code>api.ts</code> 的内容再拼接即可。从而减少了对于 <code>api.ts</code> 的读取与构建产生的开销。</p>
+<img src="/assets/the-core-of-turbopack-explained/image-1.png" alt="图出自 Turbopack 官网"/>
+<p>对于一个具有成千上百个文件的巨应用，构建工具需要对每个文件进行路径解析、文件读取、源码构建。所有巧用缓存（记住每次函数的调用结果）将可节省大量开销。</p>
+<p>这种解决方法能让 <code>Turbopack</code> 以极快的速度进行应用程序的增量构建，当文件改动，<code>devServer</code> 将快速接管并进行构建响应。</p>
+<h3>关于缓存</h3>
+<p>Turbo Engine 将这些内存缓存在运行内存中，而不是在硬盘内存中，这意味着，当启动 <code>devServer</code> 时，构建缓存将一直存在。直到关闭/停止 <code>devServer</code> 时，这些内存将被回收。</p>
+<h3>原理解释</h3>
+<p>最简构建过程</p>
+<ol>
+<li>读取入口文件源码、读取被拼接的模块 Header (/*_ @copyright the-core-of-turbopack-explained _/)</li>
+<li>拼接构建模块</li>
+<li>输出构建产物</li>
+<li>解析入口文件的依赖</li>
+</ol>
+<p>第 1,2,3 步我们统称为 <code>copy</code> 构建阶段，而后执行第 4 步 <code>getImporter</code> 构建阶段，如发现存在依赖文件，则递归执行此构建过程</p>
+<pre><code class="language-js">const main = task(&quot;main&quot;, () =&gt; {
+  const baseDir = path.join(process.cwd(), &quot;demo&quot;);
+  const outDir = path.join(process.cwd(), &quot;demo&quot;, &quot;dist&quot;);
+  const entry = path.join(baseDir, &quot;/index.js&quot;);
+  const header = path.join(process.cwd(), &quot;demo&quot;, &quot;header.js&quot;);
+  copyGraph(baseDir, outDir, entry, header);
+  log.enable &amp;&amp; printCentered(`🔥🔥 首次构建完成 🔥🔥`);
+});
+
+// 构建主流程
+const copyGraph = task(&quot;copyGraph&quot;, (baseDir, outDir, entry, header) =&gt; {
+  const relPath = path.relative(baseDir, entry);
+  const output = path.join(outDir, relPath);
+  copy(output, header, entry);
+  const importers = getImporter(entry);
+  if (importers?.length &gt; 0)
+    for (const importer of importers) {
+      copyGraph(baseDir, outDir, importer, header);
+    }
+});
+
+// 解析依赖文件的路径
+const getImporter = task(&quot;getImporter&quot;, (entry) =&gt; {
+  const ast = parse(read(entry), {
+    sourceType: &quot;module&quot;,
+    ecmaVersion: &quot;latest&quot;,
+  });
+  return (
+    ast.body
+      .filter((node) =&gt; node.type === &quot;ImportDeclaration&quot;)
+      .map((node) =&gt; node.source.value)
+      .filter((value) =&gt; {
+        return value.startsWith(&quot;./&quot;);
+      })
+      .map((value) =&gt; path.join(path.dirname(entry), value)) ?? []
+  );
+});
+
+// 输出构建产物
+const copy = task(&quot;copy&quot;, (output, header, entry) =&gt; {
+  write(output, read(header) + read(entry));
+});
+</code></pre>
+<p>每个构建阶段都使用了 task 函数进行包裹，该函数的主要目的是对「相同入参与函数名」函数的执行结果进行缓存。</p>
+<pre><code class="language-js">const taskCache = new TupleMap();
+export let currentTask = null;
+
+export const task = (name, f) =&gt; {
+  return (...args) =&gt; {
+    let task = taskCache.get([name, ...args]) ?? null;
+    if (!task) {
+      task = {
+        name,
+        args,
+        f,
+        result: undefined,
+        dependentTasks: new Set(),
+      };
+      task.result = wrapCurrentTask(task, () =&gt; logged(name, f, args));
+      taskCache.set([name, ...args], task);
+    }
+    currentTask &amp;&amp; task.dependentTasks.add(currentTask);
+    return task.result;
+  };
+};
+</code></pre>
+<h4>关键函数与变量</h4>
+<p><code>logged</code> 函数仅做日志打点用，在此不做过多解释</p>
+<p><code>currentTask</code> 变量用来记录当前所处哪个构建阶段，以方便记录各个构建阶段之间的依赖关系。</p>
+<p><code>currentTask</code> 变量记录还依赖 <code>withCurrentTask</code> 方法，具体操作为： 当前构建阶段的函数执行完毕后，会还原 <code>currentTask</code> 为其父级构建阶段，然后通过 <code>task.dependentTasks.add(currentTask)</code> 来记录当前构建阶段的父级构建阶段。</p>
+<pre><code class="language-js">// wrap current task to be able to track dependent tasks
+const wrapCurrentTask = (task, f) =&gt; {
+  const oldTask = currentTask;
+  currentTask = task;
+  try {
+    return f();
+  } finally {
+    currentTask = oldTask;
+  }
+};
+</code></pre>
+<p>依据此，即可构建出一个完整的 taskCache，如下图所示</p>
+<img src="/assets/the-core-of-turbopack-explained/image-2.png" alt="Task Cache"/>
+<h4>缓存节点属性解释</h4>
+<ul>
+<li>name: 构建阶段名，Map 的 key 之一</li>
+<li>f: 构建执行函数</li>
+<li>args: 执行函数的入参，Map 的 key 之一</li>
+<li>dependentTasks: 代表该构建阶段函数的父级集合</li>
+</ul>
+<p>现在我们已实现第一个功能，即官网中提及的 <a href="https://turbo.build/pack/docs/core-concepts#function-level-caching">Function-level caching</a></p>
+<ol>
+<li>对于重复路径的文件读取，我们可以直接从缓存中读取，而不用再次读取硬盘文件。</li>
+<li>对于重复路径的依赖文件解析，我们可以直接从缓存中读取，而不用再次使用 parser 进行依赖解析。</li>
+<li>...</li>
+</ol>
+<p>但是，我们还需要解决一个问题，那就是如何判断文件是否改动，以及文件改动后，让缓存失效。</p>
+<h4>思考</h4>
+<ul>
+<li>如何判断文件改动：我们简单通过 fs 模块的 watch 函数进行文件监听。</li>
+<li>如何使缓存失效：当文件改动后，再次进行文件读取 read 工作，并且执行冒泡操作，即递归执行父级构建阶段的函数，getImporter, write...，同时进行缓存的更新。</li>
+</ul>
+<h4>如何实现</h4>
+<p>先创建一个缓存失效函数，目的是重新执行 read 函数阶段，使缓存失效，更新 <code>task.result</code>，如果 task.result 发生变化，则递归执行父级构建阶段的函数。</p>
+<pre><code class="language-js">export const invalidate = (task) =&gt; {
+  const oldTaskResult = task.result;
+  // recalculate task
+  logged(
+    task.name,
+    () =&gt; {
+      task.result = wrapCurrentTask(task, () =&gt; {
+        return task.f(...task.args);
+      });
+    },
+    task.args
+  );
+  // invalidate dependent tasks
+  if (JSON.stringify(oldTaskResult) !== JSON.stringify(task.result)) {
+    if (task.dependentTasks.size &gt; 0) {
+      for (const dependentTask of task.dependentTasks) {
+        invalidate(dependentTask);
+      }
+    }
+  } else {
+    log.enable &amp;&amp; printCentered(`🔥🔥 ${task.name} no change 🔥🔥`);
+  }
+};
+</code></pre>
+<p>将 <code>currentTask</code> 作为入参传入 <code>invalidate</code> 缓存失效函数中，即可明确 该入口文件 &amp; 该构建阶段 的父级构建链，从而实现冒泡/增量构建中的一环。</p>
+<pre><code class="language-js">export const getInvalidator = () =&gt; {
+  if (!currentTask) log.enable &amp;&amp; console.log(&quot;&gt;&gt;&gt;&gt;&gt;no task&quot;);
+  // need to cache by another variable because currentTask is changing
+  const task = currentTask;
+  return () =&gt; invalidate(task);
+};
+</code></pre>
+<p>下一步，让缓存失效函数与文件监听函数进行关联，当文件改动时，执行缓存失效函数。</p>
+<p>借助『以 filepath 作为 key 的缓存 <code>invalidatorCache</code> 』来记录每个文件的 <code>read</code> 构建阶段的缓存失效函数。文件改动后，通过 <code>invalidatorCache</code> 找到对应的缓存失效函数，执行缓存失效函数来实现目标。</p>
+<pre><code class="language-js">export const read = task(&quot;read&quot;, (entry) =&gt; {
+  const invalidator = getInvalidator();
+  // 注册当前文件的缓存失效函数
+  invalidatorCache.set(entry, invalidator);
+  return readFileSync(entry, &quot;utf8&quot;, (err) =&gt; {
+    console.error(&quot;&gt;&gt;&gt;&gt;&gt;&gt;&gt;read error&quot;, err);
+  });
+});
+</code></pre>
+<pre><code class="language-js">watch(process.cwd(), { recursive: true }, (eventType, filename) =&gt; {
+  if (!filename) return;
+  filename = resolve(filename);
+  // 找到对应的缓存失效函数
+  const invalidator = invalidatorCache.get(filename);
+  invalidator &amp;&amp;
+    setTimeout(() =&gt; {
+      invalidatorCache.delete(filename);
+      log.enable &amp;&amp; console.time(&quot;file change&quot;);
+      // 执行缓存失效函数
+      invalidator();
+      log.enable &amp;&amp; console.timeEnd(&quot;file change&quot;);
+    }, 100);
+});
+</code></pre>
+<p>通过以上几个函数，我们即可做到 文件改动 =&gt; 使缓存失效 =&gt; 增量构建。</p>
+<p>下面我们以一个 demo 来解释一下全链路</p>
+<pre><code class="language-js">// test/index.js
+import { foo as foo1 } from &quot;./1.js&quot;;
+import { foo as foo2 } from &quot;./2.js&quot;;
+import { foo as foo3 } from &quot;./3.js&quot;;
+import { foo as foo4 } from &quot;./4.js&quot;;
+import { foo as foo5 } from &quot;./5.js&quot;;
+import { foo as foo6 } from &quot;./6.js&quot;;
+import { foo as foo7 } from &quot;./7.js&quot;;
+import { foo as foo8 } from &quot;./8.js&quot;;
+import { foo as foo9 } from &quot;./9.js&quot;;
+import { foo as foo10 } from &quot;./10.js&quot;;
+import { foo as foo11 } from &quot;./11.js&quot;;
+import { foo as foo12 } from &quot;./12.js&quot;;
+</code></pre>
+<blockquote>
+<p>第一次执行构建过程，流程如下</p>
+</blockquote>
+<img src="/assets/the-core-of-turbopack-explained/image-3.png" alt="构建过程"/>
+<h4>当 <code>./1.js</code> 文件改动时，执行如下</h4>
+<ul>
+<li>重读取 <code>./1.js</code> 文件，发现 <code>task.result</code> 与之前结果不一致，更新缓存，进行冒泡，执行父级构建链</li>
+<li>执行 <code>copy</code> 构建阶段，<code>writeFile</code> 输出构建结果，<code>task.result</code> 为 undefined，与之前结果一致，结束执行</li>
+<li>执行 <code>getImporter</code> 构建阶段，<code>task.result</code> 为 [] 空数组，JSON.stringify 后，与之前结果一致，结束执行</li>
+</ul>
+<h4>当 <code>index.js</code> 文件改动，如新增依赖 <code>import</code> 语句</h4>
+<pre><code class="language-js">import { foo as foo14 } from &quot;./14.js&quot;`
+</code></pre>
+<ul>
+<li>重读取 <code>./index.js</code> 文件，发现 <code>task.result</code> 与之前结果不一致，更新缓存，进行冒泡，执行父级构建链</li>
+<li>执行 <code>copy</code> 构建阶段，<code>writeFile</code> 输出构建结果，<code>task.result</code> 为 undefined，与之前结果一致，结束执行。</li>
+<li>执行 <code>getImporter</code> 构建阶段，<code>task.result</code> 数组新增一项，与之前结果不一致，进行冒泡。</li>
+<li>执行 <code>./index.js</code> 的 <code>copyGraph</code> 构建阶段，<code>./1.js</code> 至 <code>./13.js</code> 的构建阶段皆被缓存，不再执行。</li>
+<li>执行 <code>./14.js</code> 的 <code>copyGraph</code> 构建阶段，未命中缓存，执行 <code>copy</code> 与 <code>getImporter</code> 构建阶段，并进行 task 缓存。</li>
+<li><code>./index.js</code> 的 <code>copyGraph</code> 构建阶段的<code>task.result</code> 为 undefined，与之前结果一致，结束执行。</li>
+</ul>
+<h2>结语</h2>
+<p>欢迎 🔗 Fork 或 ❤️ Star 本仓库 <a href="https://github.com/haijie-x/the-core-of-turbopack-explained">the-core-of-turbopack-explained</a> 共同探讨与学习。</p>
+<h2>参考</h2>
+<ul>
+<li>https://portal.gitnation.org/contents/the-core-of-turbopack-explained-live-coding</li>
+<li>https://turbo.build/pack/docs/core-concepts</li>
+</ul></article></main><footer class="mt-8"><hr class="my-4"/><small class="flex justify-end "><nav class="underline decoration-1"><a class="mr-3" href="https://github.com/hai-x">@github</a><a href="https://twitter.com/__haijie">@twitter</a></nav></small></footer></div></div><script src="/_next/static/chunks/webpack-d36e14b784de5f6e.js" crossorigin="" async=""></script><script>(self.__next_f=self.__next_f||[]).push([0]);self.__next_f.push([2,null])</script><script>self.__next_f.push([1,"1:HL[\"/_next/static/media/a34f9d1faa5f3315-s.p.woff2\",\"font\",{\"crossOrigin\":\"\",\"type\":\"font/woff2\"}]\n2:HL[\"/_next/static/css/2eb10676cf259d3f.css\",\"style\",{\"crossOrigin\":\"\"}]\n0:\"$L3\"\n"])</script><script>self.__next_f.push([1,"4:I[1527,[],\"\"]\n6:I[3632,[],\"\"]\n7:I[4336,[\"38\",\"static/chunks/38-0d0b6016ca49ae6e.js\",\"185\",\"static/chunks/app/layout-16840075a6656106.js\"],\"ThemeProvider\"]\n8:I[7196,[\"38\",\"static/chunks/38-0d0b6016ca49ae6e.js\",\"185\",\"static/chunks/app/layout-16840075a6656106.js\"],\"\"]\n9:I[4038,[\"38\",\"static/chunks/38-0d0b6016ca49ae6e.js\",\"931\",\"static/chunks/app/page-f363a9acb0006aec.js\"],\"\"]\na:I[1349,[],\"\"]\nb:I[4923,[],\"\"]\n"])</script><script>self.__next_f.push([1,"3:[[[\"$\",\"link\",\"0\",{\"rel\":\"stylesheet\",\"href\":\"/_next/static/css/2eb10676cf259d3f.css\",\"precedence\":\"next\",\"crossOrigin\":\"\"}]],[\"$\",\"$L4\",null,{\"buildId\":\"IIkirz8Mf34su6h8M3SQq\",\"assetPrefix\":\"\",\"initialCanonicalUrl\":\"/posts/the-core-of-turbopack-explained\",\"initialTree\":[\"\",{\"children\":[\"posts\",{\"children\":[[\"slug\",\"the-core-of-turbopack-explained\",\"c\"],{\"children\":[\"__PAGE__?{\\\"slug\\\":[\\\"the-core-of-turbopack-explained\\\"]}\",{}]}]}]},\"$undefined\",\"$undefined\",true],\"initialHead\":[false,\"$L5\"],\"globalErrorComponent\":\"$6\",\"children\":[null,[\"$\",\"html\",null,{\"lang\":\"en\",\"suppressHydrationWarning\":true,\"children\":[[\"$\",\"title\",null,{\"children\":\"hai-x\"}],[\"$\",\"body\",null,{\"children\":[\"$\",\"$L7\",null,{\"attribute\":\"class\",\"children\":[\"$\",\"div\",null,{\"className\":\"antialiased min-h-screen bg-white text-slate-900 __className_d65c78\",\"children\":[\"$\",\"div\",null,{\"className\":\"max-w-2xl mx-auto py-10 px-4\",\"children\":[[\"$\",\"header\",null,{\"children\":[\"$\",\"div\",null,{\"className\":\"flex items-center justify-between\",\"children\":[[\"$\",\"$L8\",null,{}],[\"$\",\"nav\",null,{\"className\":\"ml-auto text-sm font-medium space-x-6\",\"children\":[[\"$\",\"$L9\",null,{\"href\":\"/\",\"children\":\"Home\"}],[\"$\",\"$L9\",null,{\"href\":\"/about\",\"children\":\"About\"}]]}]]}]}],[\"$\",\"main\",null,{\"children\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":[[\"$\",\"title\",null,{\"children\":\"404: This page could not be found.\"}],[\"$\",\"div\",null,{\"style\":{\"fontFamily\":\"system-ui,\\\"Segoe UI\\\",Roboto,Helvetica,Arial,sans-serif,\\\"Apple Color Emoji\\\",\\\"Segoe UI Emoji\\\"\",\"height\":\"100vh\",\"textAlign\":\"center\",\"display\":\"flex\",\"flexDirection\":\"column\",\"alignItems\":\"center\",\"justifyContent\":\"center\"},\"children\":[\"$\",\"div\",null,{\"children\":[[\"$\",\"style\",null,{\"dangerouslySetInnerHTML\":{\"__html\":\"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}\"}}],[\"$\",\"h1\",null,{\"className\":\"next-error-h1\",\"style\":{\"display\":\"inline-block\",\"margin\":\"0 20px 0 0\",\"padding\":\"0 23px 0 0\",\"fontSize\":24,\"fontWeight\":500,\"verticalAlign\":\"top\",\"lineHeight\":\"49px\"},\"children\":\"404\"}],[\"$\",\"div\",null,{\"style\":{\"display\":\"inline-block\"},\"children\":[\"$\",\"h2\",null,{\"style\":{\"fontSize\":14,\"fontWeight\":400,\"lineHeight\":\"49px\",\"margin\":0},\"children\":\"This page could not be found.\"}]}]]}]}]],\"notFoundStyles\":[],\"childProp\":{\"current\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\",\"posts\",\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":\"$undefined\",\"notFoundStyles\":\"$undefined\",\"childProp\":{\"current\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\",\"posts\",\"children\",[\"slug\",\"the-core-of-turbopack-explained\",\"c\"],\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":\"$undefined\",\"notFoundStyles\":\"$undefined\",\"childProp\":{\"current\":[\"$Lc\",\"$Ld\",null],\"segment\":\"__PAGE__?{\\\"slug\\\":[\\\"the-core-of-turbopack-explained\\\"]}\"},\"styles\":[]}],\"segment\":[\"slug\",\"the-core-of-turbopack-explained\",\"c\"]},\"styles\":[]}],\"segment\":\"posts\"},\"styles\":[]}]}],[\"$\",\"footer\",null,{\"className\":\"mt-8\",\"children\":[[\"$\",\"hr\",null,{\"className\":\"my-4\"}],[\"$\",\"small\",null,{\"className\":\"flex justify-end \",\"children\":[\"$\",\"nav\",null,{\"className\":\"underline decoration-1\",\"children\":[[\"$\",\"$L9\",null,{\"href\":\"https://github.com/hai-x\",\"className\":\"mr-3\",\"children\":\"@github\"}],[\"$\",\"$L9\",null,{\"href\":\"https://twitter.com/__haijie\",\"children\":\"@twitter\"}]]}]}]]}]]}]}]}]}]]}],null]}]]\n"])</script><script>self.__next_f.push([1,"e:T544,"])</script><script>self.__next_f.push([1,"const main = task(\"main\", () =\u003e {\n  const baseDir = path.join(process.cwd(), \"demo\");\n  const outDir = path.join(process.cwd(), \"demo\", \"dist\");\n  const entry = path.join(baseDir, \"/index.js\");\n  const header = path.join(process.cwd(), \"demo\", \"header.js\");\n  copyGraph(baseDir, outDir, entry, header);\n  log.enable \u0026\u0026 printCentered(`🔥🔥 首次构建完成 🔥🔥`);\n});\n\n// 构建主流程\nconst copyGraph = task(\"copyGraph\", (baseDir, outDir, entry, header) =\u003e {\n  const relPath = path.relative(baseDir, entry);\n  const output = path.join(outDir, relPath);\n  copy(output, header, entry);\n  const importers = getImporter(entry);\n  if (importers?.length \u003e 0)\n    for (const importer of importers) {\n      copyGraph(baseDir, outDir, importer, header);\n    }\n});\n\n// 解析依赖文件的路径\nconst getImporter = task(\"getImporter\", (entry) =\u003e {\n  const ast = parse(read(entry), {\n    sourceType: \"module\",\n    ecmaVersion: \"latest\",\n  });\n  return (\n    ast.body\n      .filter((node) =\u003e node.type === \"ImportDeclaration\")\n      .map((node) =\u003e node.source.value)\n      .filter((value) =\u003e {\n        return value.startsWith(\"./\");\n      })\n      .map((value) =\u003e path.join(path.dirname(entry), value)) ?? []\n  );\n});\n\n// 输出构建产物\nconst copy = task(\"copy\", (output, header, entry) =\u003e {\n  write(output, read(header) + read(entry));\n});\n"])</script><script>self.__next_f.push([1,"d:[\"$\",\"article\",null,{\"className\":\"py-6 prose dark:prose-invert\",\"children\":[[\"$\",\"h1\",null,{\"className\":\"mb-4 break-all\",\"children\":\"The core of Turbopack explained\"}],[\"$\",\"p\",null,{\"className\":\"text-slate-700\",\"children\":\"The core of Turbopack explained\"}],[\"$\",\"hr\",null,{\"className\":\"my-6\"}],[[\"$\",\"h2\",null,{\"children\":\"简述\"}],\"\\n\",[\"$\",\"blockquote\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":[\"来源： webpack 作者 Tobias Koppers 在 JS Nation\\nJSNation 2023 上的 coding live 作品\\n\",[\"$\",\"a\",null,{\"href\":\"https://portal.gitnation.org/contents/the-core-of-turbopack-explained-live-coding\",\"children\":\"The Core of Turbopack Explained (Live Coding)\"}]]}],\"\\n\"]}],\"\\n\",[\"$\",\"blockquote\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"目的：解决 webpack 因大量查找缓存、验证失效缓存导致的开销过大问题\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"本文章通过模拟一个最简构建过程来初探 Turbo Engine 的一些原理。\"}],\"\\n\",[\"$\",\"h2\",null,{\"children\":\"如何工作\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"Turbo Engine 会将某些功能标记为\",[\"$\",\"em\",null,{\"children\":\"To be remember\"}],\"。当这些函数被调用时，它会记住它们被调用的内容以及它们返回的内容。然后它将其保存在缓存中。\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"一个简单的 bundle 过程可以描述为读取源码，对源码进行构建，拼接构建产物形成最终产物 如下所示\"}],\"\\n\",[\"$\",\"img\",null,{\"src\":\"/assets/the-core-of-turbopack-explained/image.png\",\"alt\":\"图出自 Turbopack 官网\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"修改 \",[\"$\",\"code\",null,{\"children\":\"sdk.ts\"}],\" 的代码时，我们需要再次构建，再次拼接产物。此时，对于 \",[\"$\",\"code\",null,{\"children\":\"api.ts\"}],\" 文件并未改动，我们将从缓存中读取 \",[\"$\",\"code\",null,{\"children\":\"api.ts\"}],\" 的内容再拼接即可。从而减少了对于 \",[\"$\",\"code\",null,{\"children\":\"api.ts\"}],\" 的读取与构建产生的开销。\"]}],\"\\n\",[\"$\",\"img\",null,{\"src\":\"/assets/the-core-of-turbopack-explained/image-1.png\",\"alt\":\"图出自 Turbopack 官网\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"对于一个具有成千上百个文件的巨应用，构建工具需要对每个文件进行路径解析、文件读取、源码构建。所有巧用缓存（记住每次函数的调用结果）将可节省大量开销。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"这种解决方法能让 \",[\"$\",\"code\",null,{\"children\":\"Turbopack\"}],\" 以极快的速度进行应用程序的增量构建，当文件改动，\",[\"$\",\"code\",null,{\"children\":\"devServer\"}],\" 将快速接管并进行构建响应。\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"关于缓存\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"Turbo Engine 将这些内存缓存在运行内存中，而不是在硬盘内存中，这意味着，当启动 \",[\"$\",\"code\",null,{\"children\":\"devServer\"}],\" 时，构建缓存将一直存在。直到关闭/停止 \",[\"$\",\"code\",null,{\"children\":\"devServer\"}],\" 时，这些内存将被回收。\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"原理解释\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"最简构建过程\"}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"读取入口文件源码、读取被拼接的模块 Header (/*_ @copyright the-core-of-turbopack-explained _/)\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"拼接构建模块\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"输出构建产物\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"解析入口文件的依赖\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"第 1,2,3 步我们统称为 \",[\"$\",\"code\",null,{\"children\":\"copy\"}],\" 构建阶段，而后执行第 4 步 \",[\"$\",\"code\",null,{\"children\":\"getImporter\"}],\" 构建阶段，如发现存在依赖文件，则递归执行此构建过程\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"$e\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"每个构建阶段都使用了 task 函数进行包裹，该函数的主要目的是对「相同入参与函数名」函数的执行结果进行缓存。\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"const taskCache = new TupleMap();\\nexport let currentTask = null;\\n\\nexport const task = (name, f) =\u003e {\\n  return (...args) =\u003e {\\n    let task = taskCache.get([name, ...args]) ?? null;\\n    if (!task) {\\n      task = {\\n        name,\\n        args,\\n        f,\\n        result: undefined,\\n        dependentTasks: new Set(),\\n      };\\n      task.result = wrapCurrentTask(task, () =\u003e logged(name, f, args));\\n      taskCache.set([name, ...args], task);\\n    }\\n    currentTask \u0026\u0026 task.dependentTasks.add(currentTask);\\n    return task.result;\\n  };\\n};\\n\"}]}],\"\\n\",[\"$\",\"h4\",null,{\"children\":\"关键函数与变量\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[[\"$\",\"code\",null,{\"children\":\"logged\"}],\" 函数仅做日志打点用，在此不做过多解释\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[[\"$\",\"code\",null,{\"children\":\"currentTask\"}],\" 变量用来记录当前所处哪个构建阶段，以方便记录各个构建阶段之间的依赖关系。\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[[\"$\",\"code\",null,{\"children\":\"currentTask\"}],\" 变量记录还依赖 \",[\"$\",\"code\",null,{\"children\":\"withCurrentTask\"}],\" 方法，具体操作为： 当前构建阶段的函数执行完毕后，会还原 \",[\"$\",\"code\",null,{\"children\":\"currentTask\"}],\" 为其父级构建阶段，然后通过 \",[\"$\",\"code\",null,{\"children\":\"task.dependentTasks.add(currentTask)\"}],\" 来记录当前构建阶段的父级构建阶段。\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"// wrap current task to be able to track dependent tasks\\nconst wrapCurrentTask = (task, f) =\u003e {\\n  const oldTask = currentTask;\\n  currentTask = task;\\n  try {\\n    return f();\\n  } finally {\\n    currentTask = oldTask;\\n  }\\n};\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"依据此，即可构建出一个完整的 taskCache，如下图所示\"}],\"\\n\",[\"$\",\"img\",null,{\"src\":\"/assets/the-core-of-turbopack-explained/image-2.png\",\"alt\":\"Task Cache\"}],\"\\n\",[\"$\",\"h4\",null,{\"children\":\"缓存节点属性解释\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"name: 构建阶段名，Map 的 key 之一\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"f: 构建执行函数\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"args: 执行函数的入参，Map 的 key 之一\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"dependentTasks: 代表该构建阶段函数的父级集合\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"现在我们已实现第一个功能，即官网中提及的 \",[\"$\",\"a\",null,{\"href\":\"https://turbo.build/pack/docs/core-concepts#function-level-caching\",\"children\":\"Function-level caching\"}]]}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"对于重复路径的文件读取，我们可以直接从缓存中读取，而不用再次读取硬盘文件。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"对于重复路径的依赖文件解析，我们可以直接从缓存中读取，而不用再次使用 parser 进行依赖解析。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"...\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"但是，我们还需要解决一个问题，那就是如何判断文件是否改动，以及文件改动后，让缓存失效。\"}],\"\\n\",[\"$\",\"h4\",null,{\"children\":\"思考\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"如何判断文件改动：我们简单通过 fs 模块的 watch 函数进行文件监听。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"如何使缓存失效：当文件改动后，再次进行文件读取 read 工作，并且执行冒泡操作，即递归执行父级构建阶段的函数，getImporter, write...，同时进行缓存的更新。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"h4\",null,{\"children\":\"如何实现\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"先创建一个缓存失效函数，目的是重新执行 read 函数阶段，使缓存失效，更新 \",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\"，如果 task.result 发生变化，则递归执行父级构建阶段的函数。\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"export const invalidate = (task) =\u003e {\\n  const oldTaskResult = task.result;\\n  // recalculate task\\n  logged(\\n    task.name,\\n    () =\u003e {\\n      task.result = wrapCurrentTask(task, () =\u003e {\\n        return task.f(...task.args);\\n      });\\n    },\\n    task.args\\n  );\\n  // invalidate dependent tasks\\n  if (JSON.stringify(oldTaskResult) !== JSON.stringify(task.result)) {\\n    if (task.dependentTasks.size \u003e 0) {\\n      for (const dependentTask of task.dependentTasks) {\\n        invalidate(dependentTask);\\n      }\\n    }\\n  } else {\\n    log.enable \u0026\u0026 printCentered(`🔥🔥 ${task.name} no change 🔥🔥`);\\n  }\\n};\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"将 \",[\"$\",\"code\",null,{\"children\":\"currentTask\"}],\" 作为入参传入 \",[\"$\",\"code\",null,{\"children\":\"invalidate\"}],\" 缓存失效函数中，即可明确 该入口文件 \u0026 该构建阶段 的父级构建链，从而实现冒泡/增量构建中的一环。\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"export const getInvalidator = () =\u003e {\\n  if (!currentTask) log.enable \u0026\u0026 console.log(\\\"\u003e\u003e\u003e\u003e\u003eno task\\\");\\n  // need to cache by another variable because currentTask is changing\\n  const task = currentTask;\\n  return () =\u003e invalidate(task);\\n};\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"下一步，让缓存失效函数与文件监听函数进行关联，当文件改动时，执行缓存失效函数。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"借助『以 filepath 作为 key 的缓存 \",[\"$\",\"code\",null,{\"children\":\"invalidatorCache\"}],\" 』来记录每个文件的 \",[\"$\",\"code\",null,{\"children\":\"read\"}],\" 构建阶段的缓存失效函数。文件改动后，通过 \",[\"$\",\"code\",null,{\"children\":\"invalidatorCache\"}],\" 找到对应的缓存失效函数，执行缓存失效函数来实现目标。\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"export const read = task(\\\"read\\\", (entry) =\u003e {\\n  const invalidator = getInvalidator();\\n  // 注册当前文件的缓存失效函数\\n  invalidatorCache.set(entry, invalidator);\\n  return readFileSync(entry, \\\"utf8\\\", (err) =\u003e {\\n    console.error(\\\"\u003e\u003e\u003e\u003e\u003e\u003e\u003eread error\\\", err);\\n  });\\n});\\n\"}]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"watch(process.cwd(), { recursive: true }, (eventType, filename) =\u003e {\\n  if (!filename) return;\\n  filename = resolve(filename);\\n  // 找到对应的缓存失效函数\\n  const invalidator = invalidatorCache.get(filename);\\n  invalidator \u0026\u0026\\n    setTimeout(() =\u003e {\\n      invalidatorCache.delete(filename);\\n      log.enable \u0026\u0026 console.time(\\\"file change\\\");\\n      // 执行缓存失效函数\\n      invalidator();\\n      log.enable \u0026\u0026 console.timeEnd(\\\"file change\\\");\\n    }, 100);\\n});\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"通过以上几个函数，我们即可做到 文件改动 =\u003e 使缓存失效 =\u003e 增量构建。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"下面我们以一个 demo 来解释一下全链路\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"// test/index.js\\nimport { foo as foo1 } from \\\"./1.js\\\";\\nimport { foo as foo2 } from \\\"./2.js\\\";\\nimport { foo as foo3 } from \\\"./3.js\\\";\\nimport { foo as foo4 } from \\\"./4.js\\\";\\nimport { foo as foo5 } from \\\"./5.js\\\";\\nimport { foo as foo6 } from \\\"./6.js\\\";\\nimport { foo as foo7 } from \\\"./7.js\\\";\\nimport { foo as foo8 } from \\\"./8.js\\\";\\nimport { foo as foo9 } from \\\"./9.js\\\";\\nimport { foo as foo10 } from \\\"./10.js\\\";\\nimport { foo as foo11 } from \\\"./11.js\\\";\\nimport { foo as foo12 } from \\\"./12.js\\\";\\n\"}]}],\"\\n\",[\"$\",\"blockquote\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"第一次执行构建过程，流程如下\"}],\"\\n\"]}],\"\\n\",[\"$\",\"img\",null,{\"src\":\"/assets/the-core-of-turbopack-explained/image-3.png\",\"alt\":\"构建过程\"}],\"\\n\",[\"$\",\"h4\",null,{\"children\":[\"当 \",[\"$\",\"code\",null,{\"children\":\"./1.js\"}],\" 文件改动时，执行如下\"]}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"重读取 \",[\"$\",\"code\",null,{\"children\":\"./1.js\"}],\" 文件，发现 \",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 与之前结果不一致，更新缓存，进行冒泡，执行父级构建链\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"copy\"}],\" 构建阶段，\",[\"$\",\"code\",null,{\"children\":\"writeFile\"}],\" 输出构建结果，\",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 为 undefined，与之前结果一致，结束执行\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"getImporter\"}],\" 构建阶段，\",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 为 [] 空数组，JSON.stringify 后，与之前结果一致，结束执行\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"h4\",null,{\"children\":[\"当 \",[\"$\",\"code\",null,{\"children\":\"index.js\"}],\" 文件改动，如新增依赖 \",[\"$\",\"code\",null,{\"children\":\"import\"}],\" 语句\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-js\",\"children\":\"import { foo as foo14 } from \\\"./14.js\\\"`\\n\"}]}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"重读取 \",[\"$\",\"code\",null,{\"children\":\"./index.js\"}],\" 文件，发现 \",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 与之前结果不一致，更新缓存，进行冒泡，执行父级构建链\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"copy\"}],\" 构建阶段，\",[\"$\",\"code\",null,{\"children\":\"writeFile\"}],\" 输出构建结果，\",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 为 undefined，与之前结果一致，结束执行。\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"getImporter\"}],\" 构建阶段，\",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 数组新增一项，与之前结果不一致，进行冒泡。\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"./index.js\"}],\" 的 \",[\"$\",\"code\",null,{\"children\":\"copyGraph\"}],\" 构建阶段，\",[\"$\",\"code\",null,{\"children\":\"./1.js\"}],\" 至 \",[\"$\",\"code\",null,{\"children\":\"./13.js\"}],\" 的构建阶段皆被缓存，不再执行。\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"执行 \",[\"$\",\"code\",null,{\"children\":\"./14.js\"}],\" 的 \",[\"$\",\"code\",null,{\"children\":\"copyGraph\"}],\" 构建阶段，未命中缓存，执行 \",[\"$\",\"code\",null,{\"children\":\"copy\"}],\" 与 \",[\"$\",\"code\",null,{\"children\":\"getImporter\"}],\" 构建阶段，并进行 task 缓存。\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[[\"$\",\"code\",null,{\"children\":\"./index.js\"}],\" 的 \",[\"$\",\"code\",null,{\"children\":\"copyGraph\"}],\" 构建阶段的\",[\"$\",\"code\",null,{\"children\":\"task.result\"}],\" 为 undefined，与之前结果一致，结束执行。\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"h2\",null,{\"children\":\"结语\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"欢迎 🔗 Fork 或 ❤️ Star 本仓库 \",[\"$\",\"a\",null,{\"href\":\"https://github.com/haijie-x/the-core-of-turbopack-explained\",\"children\":\"the-core-of-turbopack-explained\"}],\" 共同探讨与学习。\"]}],\"\\n\",[\"$\",\"h2\",null,{\"children\":\"参考\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"https://portal.gitnation.org/contents/the-core-of-turbopack-explained-live-coding\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"https://turbo.build/pack/docs/core-concepts\"}],\"\\n\"]}]]]}]\n"])</script><script>self.__next_f.push([1,"5:[[\"$\",\"meta\",\"0\",{\"charSet\":\"utf-8\"}],[\"$\",\"title\",\"1\",{\"children\":\"The core of Turbopack explained\"}],[\"$\",\"meta\",\"2\",{\"name\":\"description\",\"content\":\"The core of Turbopack explained\"}],[\"$\",\"meta\",\"3\",{\"name\":\"viewport\",\"content\":\"width=device-width, initial-scale=1\"}],[\"$\",\"meta\",\"4\",{\"name\":\"next-size-adjust\"}]]\nc:null\n"])</script></body></html>
