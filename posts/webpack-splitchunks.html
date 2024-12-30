@@ -1,0 +1,562 @@
+<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" href="/_next/static/media/a34f9d1faa5f3315-s.p.woff2" as="font" crossorigin="" type="font/woff2"/><link rel="stylesheet" href="/_next/static/css/2eb10676cf259d3f.css" crossorigin="" data-precedence="next"/><link rel="preload" as="script" fetchPriority="low" href="/_next/static/chunks/webpack-43c42d52cdb06b2d.js" crossorigin=""/><script src="/_next/static/chunks/9a28f2a4-325006bed6c0406c.js" async="" crossorigin=""></script><script src="/_next/static/chunks/748-a46810dc8bd60d1b.js" async="" crossorigin=""></script><script src="/_next/static/chunks/main-app-3645b298c4863d62.js" async="" crossorigin=""></script><script src="/_next/static/chunks/39-cefea7e4f434356b.js" async=""></script><script src="/_next/static/chunks/app/layout-2a9799121329ca53.js" async=""></script><script src="/_next/static/chunks/app/page-401250cce1be0565.js" async=""></script><title>webpack@4 optimization.splitChunks</title><meta name="description" content="webpack@4 optimization.splitChunks"/><meta name="next-size-adjust"/><title>hai-x</title><script src="/_next/static/chunks/polyfills-c67a75d1b6f99dc8.js" crossorigin="" noModule=""></script></head><body><script>((e,t,r,a,o,l,u,i)=>{let s=document.documentElement,c=["light","dark"];function p(t){(Array.isArray(e)?e:[e]).forEach(e=>{let r="class"===e,a=r&&l?o.map(e=>l[e]||e):o;r?(s.classList.remove(...a),s.classList.add(t)):s.setAttribute(e,t)}),i&&c.includes(t)&&(s.style.colorScheme=t)}if(a)p(a);else try{let e=localStorage.getItem(t)||r,a=u&&"system"===e?window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light":e;p(a)}catch(e){}})("class","theme","system",null,["light","dark"],null,true,true)</script><div class="antialiased min-h-screen bg-white text-slate-900 __className_d65c78"><div class="max-w-2xl mx-auto py-10 px-4"><header><div class="flex items-center justify-between"><div class="w-6 h-6"></div><nav class="ml-auto text-sm font-medium space-x-6"><a href="/">Home</a><a href="/about">About</a></nav></div></header><main><article class="py-6 prose dark:prose-invert"><h1 class="mb-4 break-all">webpack@4 optimization.splitChunks</h1><p class="text-slate-700">webpack@4 optimization.splitChunks</p><hr class="my-6"/><blockquote>
+<p>本文将展开分析 webpack@4 内的优化项 SplitChunks, 注意 SplitChunks 和 Code Splitting 有所不同, 常说的 Code Splitting 一般指代码分割, 通过 动态导入 dynamic import() 实现。</p>
+</blockquote>
+<p>希望读者们能在阅读后学到东西, 同时 遇到疏漏/问题, 也请进行指正。</p>
+<p>相关代码: <a href="https://github.com/haijie-x/webpack-split-chunks-demo">github/webpack-split-chunks-demo</a></p>
+<h3>名词解释</h3>
+<ul>
+<li>
+<p>Chunk: 由 modules 集合 + modules 加载后会执行的方法 组成 , 可理解为 构建输出的 js 产物。
+<code>Each chunk has a corresponding asset. The assets are the output files - the result of bundling.</code></p>
+<p>chunk 如何产生？</p>
+<p>Entry Points (webpack config entry 配置项)</p>
+<pre><code class="language-javascript">// webpack.config.js
+module.exports = {
+  entry: &#x27;./path/to/my/entry/file.js&#x27;
+}
+</code></pre>
+<p>动态导入语句</p>
+<pre><code class="language-javascript">import(&#x27;./path/to/my/entry/file.js&#x27;)
+</code></pre>
+<p>chunk 如何执行？</p>
+<pre><code class="language-javascript">// 模拟下 module system 里的 jsonp 方法, jsonp 具体做 缓存模块 + 执行模块
+// require 等实现不做展开
+window.mock_jsonp(
+  // chunk id
+  &#x27;0&#x27;,
+  // chunk 包含的模块集合
+  {
+    0: (module, exports, require) =&gt; {
+      console.log(`entry module`)
+    }
+  },
+  // 执行 mock_jsonp 方法时, 将执行该函数
+  (require) =&gt; {
+    require(0)
+  }
+)
+</code></pre>
+</li>
+<li>
+<p>SplitChunks: 中文为 拆分 chunks, 拆分前 chunk-1 到 拆分后 chunk-1-1, chunk-1-2…</p>
+<p>大多数情况下 chunks 的拆分 意味着 modules 的合并, 所以对 chunks 进行拆分 与 module 的关系密不可分。</p>
+</li>
+</ul>
+<h3>用途</h3>
+<p>随着业务规模/复杂度上升, Webapp 项目的体积也越来越大, 对于用户而言, 页面首屏加载速度尤为关键, 加载依赖网络, 开发者需要构建出一个适配不同网络情况/业务特性的应用产物。</p>
+<p>对于一些不支持 http2 的应用, 我们需限制首屏最大并行请求数量。但对于支持 http2 的应用, 我们需充分发挥多路复用的特性。</p>
+<p>对于用户流量大 &amp; 需求经常迭代变更的应用, 每次发版, 相关改动的 bundle 都将变成冷资源, 热起来需一段时间, 故需「擅用缓存」, 从构建层面, 开发者可以辅助用户「使用缓存」, 如 chunkHash/contentHash, hashModule, 将不经常变更三方依赖抽离成单独的 vendor chunk, 将 体积较大的三方依赖 &amp; 几乎不变更的依赖 (react/react-dom 等)做 external。</p>
+<h3>常用配置项</h3>
+<ol>
+<li>
+<p>chunks : 规定了什么类型的 chunk 将被拆分, 可选 all , initial, async, 其中 initial 由 EntryPoints 产生, async 由 dyn import() 产生, all 则表示所有 chunk 都可被拆分。</p>
+</li>
+<li>
+<p>name: 规定拆分后的 chunk 的名称。应避免使用常量字符串 or 返回相同的字符串, 若 cacheGroup 未指定 name , 这将导致不同的 cacheGroup 使用相同 name, 最终导致所有模块合并到 同一个 chunk 中。</p>
+</li>
+<li>
+<p>maxAsyncRequests: 动态加载 最大的并行请求数。</p>
+</li>
+<li>
+<p>maxInitialRequests: 首屏加载 最大的并行请求数。</p>
+</li>
+<li>
+<p>minChunks: 规定了拆分前的模块至少存在几个 chunk 内。</p>
+</li>
+<li>
+<p>minSize: 规定了拆分后的 chunk 最小体积。</p>
+</li>
+<li>
+<p>maxSize: 规定了拆分后的 chunk 最大体积, 该规则可能会被打破（为何会被打破, 下文分析会讲解）。</p>
+</li>
+<li>
+<p>cacheGroup: 定义单个 chunk 的拆分规则, 会继承, 覆盖 splitChunks.* 的任何选项, 额外多出 test, priority 和 reuseExistingChunk 属性。</p>
+</li>
+<li>
+<p>test: 模块匹配规则</p>
+</li>
+<li>
+<p>priority: 组别优先级, 如开发者新增一个组别来匹配 node_modules 里具体的某些模块, 同时 webpack 内部有 vender 组别, 开发者可通过 priority 属性提升优先级进行拆分。</p>
+</li>
+<li>
+<p>reuseExistingChunk: 是否复用已有 chunk, splitChunks 默认行为是通过 addChunk() 新增 chunk, 若拆分出的 chunk 的模块集合 === 已有 chunk 的模块集合, 则不新增, 相当于 「拆了个寂寞」。</p>
+</li>
+</ol>
+<h3>如何配置</h3>
+<p>选择默认配置是为了适应 Web 性能最佳实践, 但您的项目的最佳策略可能有所不同。如果您要更改配置, 则应该衡量更改的效果, 以确保带来真正的好处。</p>
+<ul>
+<li>默认预设</li>
+</ul>
+<ol>
+<li>webpack 4: https://v4.webpack.js.org/plugins/split-chunks-plugin/#optimizationsplitchunks</li>
+<li>webpack 5: https://webpack.js.org/plugins/split-chunks-plugin/#optimizationsplitchunks</li>
+<li><a href="https://github.com/vercel/next.js/blob/f85d3af12d693ebed85f511f8b9f1484a71e75f0/packages/next/src/build/webpack-config.ts#L901%5D">nextjs</a></li>
+</ol>
+<h3>思考</h3>
+<ul>
+<li>
+<p>拆分 chunks 由构建工具完成, 这在用户侧是如何表现的？</p>
+<pre><code class="language-javascript">// main.js
+import(
+  /* webpackChunkName:
+&quot;async-a&quot; */ &#x27;./a&#x27;
+)
+
+// a.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// 30KB.js
+// ...
+// 30KB 字符串, 这里不展开
+</code></pre>
+<p><strong>使用 webpack 默认配置, 会将 node_modules 的模块拆分到新 chunk 内。</strong></p>
+<p>构建产物如下</p>
+<ul>
+<li>async-a.chunk.js</li>
+<li>main.js</li>
+<li>vendors~async-a.chunk.js</li>
+</ul>
+<pre><code class="language-javascript">// main.js
+
+// ...
+Promise.all(
+  /* import() | async-a */ [
+    __webpack_require__.e(0),
+    __webpack_require__.e(1)
+  ]
+).then(__webpack_require__.bind(null, 1))
+// ...
+</code></pre>
+<p>webpack_require.e 内部维护了一个 chunkId -&gt; url 的 map 来动态加载 script 脚本, 函数返回一个 Promise , 这里不做具体展开。</p>
+<p>源码中对 async-a 模块的加载执行, 被编译为同时加载 2 个 chunk（async-a + vendor）后 执行 async-a 模块。</p>
+<p><strong>如何确保「拆分」不影响原有的 chunkGraph 各个 chunk 节点关系？</strong></p>
+<ul>
+<li>webpack4 之前 「父 chunk → 子 chunk 」关系</li>
+<li>webpack4 及之后「父 chunkGroup(chunks 集合) → 子 chunkGroup(chunks 集合) 」关系</li>
+</ul>
+<p><strong>为什么要对数据结构进行优化？采用 chunksGroup, 而不是 chunk?</strong></p>
+<ul>
+<li>
+<p>如果 依赖关系是 chunk-a → chunk-b（chunk b 依赖 chunk a）, 从 chunk-a 拆分出 chunk-a-a。此时将面临一个问题: chunk-a-a 该作为 chunk-a 的父还是子？父子关系意味着模块加载的顺序, 比如 「chunk-a 的加载 依赖着 chunk-a-a 的加载」, 两者都将导致额外的性能开销, 即 并行加载 变成 串行加载。</p>
+<p>简单代码解释: <code>load(chunk-a).then(()⇒{load(chunk-a-a)})</code></p>
+</li>
+<li>
+<p>如果 依赖关系为 chunkGroup-a → chunkGroup-b（chunkGroup-b 依赖 chunkGroup-a）, 此时从 chunk-a 拆分出 chunk-a-a, 并不影响 chunkGroup 的依赖关系, 要做的只是往 chunk-a 所在的 chunkGroup.chunks 数组 push 进 chunk-a-a。chunkGroup.chunks 里的每个 chunk 仍并行加载。</p>
+<p>简单代码解释: <code>chunkGroup.chunks.forEach(load)</code></p>
+</li>
+</ul>
+<p><strong>可见, 上文思考提到的内容, async-a + vendor 同属于 一个 chunkGroup。</strong></p>
+<pre><code class="language-javascript">// lib/RuntimeTemplate.js
+blockPromise({ block, message }) {
+    // ...
+    const chunks = block.chunkGroup.chunks.filter(
+            chunk =&gt; !chunk.hasRuntime() &amp;&amp; chunk.id !== null
+    );
+    // ...
+    if (chunks.length === 1) {
+            const chunkId = JSON.stringify(chunks[0].id);
+            return `__webpack_require__.e(${comment}${chunkId})`;
+    } else if (chunks.length &gt; 0) {
+            const requireChunkId = chunk =&gt;
+                    `__webpack_require__.e(${JSON.stringify(chunk.id)})`;
+            return `Promise.all(${comment.trim()}[${chunks
+                    .map(requireChunkId)
+                    .join(&quot;, &quot;)}])`;
+    } else {
+            return `Promise.resolve(${comment.trim()})`;
+    }
+}
+</code></pre>
+<blockquote>
+<p>https://medium.com/webpack/webpack-4-code-splitting-chunk-graph-and-the-splitchunks-optimization-be739a861366</p>
+</blockquote>
+</li>
+</ul>
+<h3>前置了解</h3>
+<ol>
+<li>功能的输入和输出都为 chunks, 输入的 chunks 是基于模块依赖关系初步形成的。</li>
+<li>一个模块可能命中多个 cacheGroups, 最终通过 priority , test 等属性, 决定模块处于哪个 cacheGroups 中, 即模块被拆分到 哪个 chunk 中。</li>
+<li>单个 module 实例 记录了其所在的所有 chunks 集合。</li>
+<li>单个 chunk 实例 记录了其包含的所有 module 集合与 其所在的所有 chunkGroups 集合。</li>
+</ol>
+<h3>简略设计</h3>
+<p>思考一下 如果目标是 「将命中 <code>splitChunks.cacheGroups.{cacheGroup}.test</code> 的模块 都抽离到 新 chunk 内」, 我们需要怎么做？</p>
+<ol>
+<li>首先, 找到 所有匹配中的模块, 并依次找到 模块所在的 chunks 集合, 若模块被复用, 则 chunks 长度 大于等于 1。（以下的 chunks 指 模块所在的 chunks 集合）</li>
+<li>判断 chunks 的长度是否 大于等于 minChunk, 若不满足, 则过滤该模块（表示 &lt; minChunk 的 chunk 数量 依赖此模块）。</li>
+<li>判断 剩余模块的总体积 是否 大于等于 minSize, 若不满足, 则退出功能。</li>
+<li>判断 是否能复用已有 chunk（判断依据为 是否存在一个 chunk 包含所有剩余模块）, 若不满足, 则后续会新增 chunk, 否则复用 chunk（即新 chunk 为自身）。</li>
+<li>判断 每个 chunk 实例所在的每个 chunkGroups 中的 chunks[] 数量 是否有 &lt; maxRequest, 若不满足, 则过滤该 chunk（表示 存在某个 import/entry 会导致 大于等于 maxRequest 的 js 请求数）。（以下的 chunkGroups 指 chunk 实例所在的 chunkGroups 集合）</li>
+<li>再次判断 chunks 的长度是否 大于等于 minChunk, 若不满足, 则过滤该模块。</li>
+<li>遍历剩余模块: 模块所在 chunk 实例中 记录的模块集合中, 删除模块自身, 同时向所在的 chunkGroups 中添加 新 chunk, 并向 新 chunk 添加该模块。</li>
+<li>判断 chunk 的总体积 是否 &lt; maxSize, 若不满足, 则对 新 chunk 进行拆分。</li>
+<li>至此所有拆分规则皆满足, 且 新 chunk 已存在。</li>
+</ol>
+<h3>深入源码</h3>
+<p>让我们深入下 webpack （v4.44.2）如何实现 splitChunks 功能？</p>
+<pre><code class="language-javascript">// lib/optimize/SplitChunksPlugin.js
+module.exports = class SplitChunksPlugin {
+  apply(compiler) {
+    compiler.hooks.thisCompilation.tap(&#x27;SplitChunksPlugin&#x27;, (compilation) =&gt; {
+      let alreadyOptimized = false
+      compilation.hooks.unseal.tap(&#x27;SplitChunksPlugin&#x27;, () =&gt; {
+        alreadyOptimized = false
+      })
+      compilation.hooks.optimizeChunksAdvanced.tap(
+        &#x27;SplitChunksPlugin&#x27;,
+        (chunks) =&gt; {
+          // ...
+        }
+      )
+    })
+  }
+}
+</code></pre>
+<p>向 optimizeChunksAdvanced 事件钩子注册事件, 并接收到初步形成的 chunks。设立标志位 alreadyOptimized 避免重复执行功能, 除非编译阶段接收到新模块。</p>
+<pre><code class="language-javascript">const indexMap = new Map()
+let index = 1
+for (const chunk of chunks) {
+  indexMap.set(chunk, index++)
+}
+const chunkSetsInGraph = new Map()
+for (const module of compilation.modules) {
+  const chunksKey = getKey(module.chunksIterable)
+  if (!chunkSetsInGraph.has(chunksKey)) {
+    chunkSetsInGraph.set(chunksKey, new Set(module.chunksIterable))
+  }
+}
+const chunkSetsByCount = new Map()
+for (const chunksSet of chunkSetsInGraph.values()) {
+  const count = chunksSet.size
+  let array = chunkSetsByCount.get(count)
+  if (array === undefined) {
+    array = []
+    chunkSetsByCount.set(count, array)
+  }
+  array.push(chunksSet)
+}
+</code></pre>
+<p>初始化 三个数据结构 indexMap / chunkSetsInGraph / chunkSetsByCount</p>
+<ul>
+<li>
+<p>indexMap 维护 chunk 到 index 的映射。 <code>{ chunk-a ⇒ 0, chunk-b ⇒ 1, … }</code></p>
+</li>
+<li>
+<p>chunkSetsInGraph 维护 chunksKey 到 chunks 集合 的映射。chunk 集合 指 模块所在的所有 chunks 集合。如 module-a 被 chunk-a, chunk-b, chunk-c 依赖, 则 module-a 的 chunks 集合为 [chunk-a, chunk-b, chunk-c] , chunksKey 由 这些 chunk 对应的 index 拼接而成。</p>
+<p>补充: ”module-a 被 chunk-a, chunk-b, chunk-c 依赖” 可能有些难懂, 以下模拟过程简单解释下。</p>
+<pre><code class="language-javascript">// 源代码
+// a.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// b.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// c.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// main.js
+import(
+  /* webpackChunkName:
+&quot;async-a&quot; */ &#x27;./a&#x27;
+)
+import(
+  /* webpackChunkName:
+&quot;async-b&quot; */ &#x27;./b&#x27;
+)
+import(
+  /* webpackChunkName:
+&quot;async-c&quot; */ &#x27;./c&#x27;
+)
+</code></pre>
+<p>拆分前的构建产物如下</p>
+<ul>
+<li>
+<p>main.js</p>
+</li>
+<li>
+<p>async-a.chunk.js 包含的模块 「30KB 」</p>
+</li>
+<li>
+<p>async-b.chunk.js 包含的模块 「30KB」</p>
+</li>
+<li>
+<p>async-c.chunk.js 包含的模块 「30KB 」</p>
+</li>
+</ul>
+<p>此时 我们可以认为 模块 「30KB 」被 [ async-a.chunk.js, async-b.chunk.js, async-c.chunk.js ] 依赖。</p>
+</li>
+<li>
+<p>chunkSetsByCount 维护 chunks 集合个数 到 chunks 集合 的映射。主要作用 是为了后续找到「所有可拆分的 chunks 组合」</p>
+</li>
+</ul>
+<pre><code class="language-javascript">// Create a list of possible combinations
+const combinationsCache = new Map() // Map&lt;string, Set&lt;Chunk&gt;[]&gt;
+
+const getCombinations = (key) =&gt; {
+  const chunksSet = chunkSetsInGraph.get(key)
+  var array = [chunksSet]
+  if (chunksSet.size &gt; 1) {
+    for (const [count, setArray] of chunkSetsByCount) {
+      // &quot;equal&quot; is not needed because they would have been merge in the first step
+      if (count &lt; chunksSet.size) {
+        for (const set of setArray) {
+          if (isSubset(chunksSet, set)) {
+            array.push(set)
+          }
+        }
+      }
+    }
+  }
+  return array
+}
+// ...
+// Prepare some values
+for (const module of compilation.modules) {
+  // ...
+  const chunksKey = getKey(module.chunksIterable)
+  let combs = combinationsCache.get(chunksKey)
+  if (combs === undefined) {
+    combs = getCombinations(chunksKey)
+    combinationsCache.set(chunksKey, combs)
+  }
+  // ...
+}
+</code></pre>
+<p>getCombinations 方法通过 chunkSetsByCount 找到 所有「可拆分 chunks 组合」并缓存到 combinationsCache 中。</p>
+<p>比如 module-a 被 chunk-a, chunk-b, chunk-c 依赖, module-b 被 chunk-b, chunk-c 依赖。那么对于 module-a, 拆分组合为 <code>{ chunk-a, chunk-b, chunk-c } , { chunk-b, chunk-c }</code></p>
+<p>思考:</p>
+<p><strong>为什么要找到所有可拆分 chunks 的组合？</strong></p>
+<p>设想场景:</p>
+<ol>
+<li>module-a 从 chunk-a, chunk-b, chunk-c 拆出。</li>
+<li>chunk-c 所在 chunkGroups 的 chunks 集合为 3。</li>
+<li>设置规则 maxRequest = 3。</li>
+</ol>
+<p>该组合将违反了 maxRequest 规则, 该组合将被舍弃。但可满足「 组合二 module-a 从 chunk-a, chunk-b 拆出」。</p>
+<pre><code class="language-javascript">const chunksInfoMap = new Map()
+
+const addModuleToChunksInfoMap = (
+  cacheGroup,
+  cacheGroupIndex,
+  selectedChunks,
+  selectedChunksKey,
+  module
+) =&gt; {
+  // Break if minimum number of chunks is not reached
+  if (selectedChunks.length &lt; cacheGroup.minChunks) return
+  // Determine name for split chunk
+  const name = cacheGroup.getName(module, selectedChunks, cacheGroup.key)
+  // Create key for maps
+  // When it has a name we use the name as key
+  // Elsewise we create the key from chunks and cache group key
+  // This automatically merges equal names
+  const key =
+    cacheGroup.key + (name ? ` name:${name}` : ` chunks:${selectedChunksKey}`)
+  // Add module to maps
+  let info = chunksInfoMap.get(key)
+  if (info === undefined) {
+    chunksInfoMap.set(
+      key,
+      (info = {
+        modules: new SortableSet(undefined, sortByIdentifier),
+        cacheGroup,
+        cacheGroupIndex,
+        name,
+        size: 0,
+        chunks: new Set(),
+        reuseableChunks: new Set(),
+        chunksKeys: new Set()
+      })
+    )
+  }
+  info.modules.add(module)
+  info.size += module.size()
+  if (!info.chunksKeys.has(selectedChunksKey)) {
+    info.chunksKeys.add(selectedChunksKey)
+    for (const chunk of selectedChunks) {
+      info.chunks.add(chunk)
+    }
+  }
+}
+</code></pre>
+<pre><code class="language-javascript">for (const module of compilation.modules) {
+  // ...
+  // For all combination of chunk selection
+  for (const chunkCombination of combs) {
+    // Break if minimum number of chunks is not reached
+    if (chunkCombination.size &lt; cacheGroup.minChunks) continue
+    // Select chunks by configuration
+    const { chunks: selectedChunks, key: selectedChunksKey } =
+      getSelectedChunks(chunkCombination, cacheGroup.chunksFilter)
+
+    addModuleToChunksInfoMap(
+      cacheGroup,
+      cacheGroupIndex,
+      selectedChunks,
+      selectedChunksKey,
+      module
+    )
+  }
+}
+</code></pre>
+<p>通过 getSelectedChunks 方法筛选有哪些 chunks 可被拆分, 这里使用到了 splitChunks.chunks 值做过滤。若 chunks 配置为 “all”, 则所有 chunks 都可被选择。若 chunks 配置为 “async”, 则只能拆分 async 类型的 chunk。</p>
+<p>通过 addModuleToChunksInfoMap 方法去初始化 chunksInfoMap, addModuleToChunksInfoMap 算是整个源码中较为重要的函数, 上文提到 combinationsCache 存放的是所有「可拆分的 chunks 组合」, 这里的 chunksInfoMap 存放的就是所有「拆分组合」, 它将 modules, chunks, cacheGroup 都链接在一起。</p>
+<p>可能还是有些晦涩难懂, 这里以上文提到的例子展开讲解下。</p>
+<pre><code class="language-javascript">// 源代码
+// a.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// b.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// c.js
+import bigFile from &#x27;30KB&#x27;
+console.log(bigFile)
+
+// main.js
+import(
+  /* webpackChunkName:
+&quot;async-a&quot; */ &#x27;./a&#x27;
+)
+import(
+  /* webpackChunkName:
+&quot;async-b&quot; */ &#x27;./b&#x27;
+)
+import(
+  /* webpackChunkName:
+&quot;async-c&quot; */ &#x27;./c&#x27;
+)
+
+// webpack.config.js 采用默认的 splitChunks 配置
+module.exports = {
+  //...
+  optimization: {
+    splitChunks: {
+      chunks: &#x27;async&#x27;,
+      minSize: 30000,
+      maxSize: 0,
+      minChunks: 1,
+      maxAsyncRequests: 5,
+      maxInitialRequests: 3,
+      automaticNameDelimiter: &#x27;~&#x27;,
+      automaticNameMaxLength: 30,
+      name: true,
+      cacheGroups: {
+        vendors: {
+          test: /[\\/]node_modules[\\/]/,
+          priority: -10
+        },
+        default: {
+          minChunks: 2,
+          priority: -20,
+          reuseExistingChunk: true
+        }
+      }
+    }
+  }
+}
+</code></pre>
+<p>以上存在两个 cacheGroups, 显然「30KB」模块皆命中, 所有拆分组合都被列举出来了, 最终形成的 chunksInfoMap 结果如下:</p>
+<pre><code class="language-javascript">{
+	&#x27;default name:async-a~async-b~async-c&#x27;: {
+		chunks:[async-a,async-b,async-c],
+		cacheGroup: default,
+		modules:[30KB],
+		size:30833
+		// ...
+	}
+	&#x27;vendors name:vendors~async-a~async-b~async-c&#x27;:{
+		chunks:[async-a,async-b,async-c],
+		cacheGroup: vendor,
+		modules:[30KB],
+		size:30833
+		// ...
+	},
+	&#x27;vendors name:vendors~async-a&#x27;:{
+		chunks:[async-a],
+		cacheGroup: vendor,
+		modules:[30KB],
+		size:30833
+		// ...
+	},
+	&#x27;vendors name:vendors~async-b&#x27;:{
+		chunks:[async-b],
+		cacheGroup: vendor,
+		modules:[30KB],
+		size:30833
+		// ...
+	},
+	&#x27;vendors name:vendors~async-c&#x27;:{
+		chunks:[async-c],
+		cacheGroup: vendor,
+		modules:[30KB],
+		size:30833
+		// ...
+	}
+}
+</code></pre>
+<p>最重要的 chunksInfoMap 数据结构介绍完毕, 后续便是 遍历 chunksInfoMap 每次选择最优的一项 进行拆分。那么如何判断「最优」？</p>
+<pre><code class="language-javascript">const compareEntries = (a, b) =&gt; {
+  // 1. by priority
+  const diffPriority = a.cacheGroup.priority - b.cacheGroup.priority
+  if (diffPriority) return diffPriority
+  // 2. by number of chunks
+  const diffCount = a.chunks.size - b.chunks.size
+  if (diffCount) return diffCount
+  // 3. by size reduction
+  const aSizeReduce = a.size * (a.chunks.size - 1)
+  const bSizeReduce = b.size * (b.chunks.size - 1)
+  const diffSizeReduce = aSizeReduce - bSizeReduce
+  if (diffSizeReduce) return diffSizeReduce
+  // 4. by cache group index
+  const indexDiff = a.cacheGroupIndex - b.cacheGroupIndex
+  if (indexDiff) return indexDiff
+  // 5. by number of modules (to be able to compare by identifier)
+  const modulesA = a.modules
+  const modulesB = b.modules
+  const diff = modulesA.size - modulesB.size
+  if (diff) return diff
+  // 6. by module identifiers
+  modulesA.sort()
+  modulesB.sort()
+  const aI = modulesA[Symbol.iterator]()
+  const bI = modulesB[Symbol.iterator]()
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const aItem = aI.next()
+    const bItem = bI.next()
+    if (aItem.done) return 0
+    const aModuleIdentifier = aItem.value.identifier()
+    const bModuleIdentifier = bItem.value.identifier()
+    if (aModuleIdentifier &gt; bModuleIdentifier) return -1
+    if (aModuleIdentifier &lt; bModuleIdentifier) return 1
+  }
+}
+</code></pre>
+<p>依次比较</p>
+<ol>
+<li>priority</li>
+<li>chunks 数量</li>
+<li>总体积减少大小（比如 组合 A 和 组合 B 拆分出的 chunk 体积都为 30833, 组合 A 从 2 个 chunk 拆出, 组合 B 从 3 个 chunk 拆出, 所以组合 B 「总体积减少 」大于 组合 A「总体积减少 」, 则最优解是 组合 B）</li>
+<li>cacheGroups 索引位置</li>
+<li>包含的 module 集合长度</li>
+<li>两个组合内 每一个 module id 字符串</li>
+</ol>
+<p>每次遍历 都找到了最优的拆分组合, 后续就要进行 拆分判断 &amp; 具体拆分动作了。这一部分已在上节「简略设计」中讲述, 后续源码就不再展开讲解了。</p>
+<h3>总结</h3>
+<p>Webpack v4.44.2 版本的 SplitChunks 插件源码共 1k 行, 加上近 300 行的 deterministicGroupingForModules maxSize 拆分算法, 为 webapp 应用的性能优化提供了较为优秀的解决方案。再次感叹 webpack 的强大。</p>
+<h3>相关文章</h3>
+<ul>
+<li>
+<p>https://medium.com/webpack/webpack-4-code-splitting-chunk-graph-and-the-splitchunks-optimization-be739a861366</p>
+</li>
+<li>
+<p>https://web.dev/articles/granular-chunking-nextjs</p>
+</li>
+</ul></article></main><footer class="mt-8"><hr class="my-4"/><small class="flex justify-end "><nav class="underline decoration-1"><a class="mr-3" href="https://github.com/hai-x">@github</a><a href="https://twitter.com/__haijie">@twitter</a></nav></small></footer></div></div><script src="/_next/static/chunks/webpack-43c42d52cdb06b2d.js" crossorigin="" async=""></script><script>(self.__next_f=self.__next_f||[]).push([0]);self.__next_f.push([2,null])</script><script>self.__next_f.push([1,"1:HL[\"/_next/static/media/a34f9d1faa5f3315-s.p.woff2\",\"font\",{\"crossOrigin\":\"\",\"type\":\"font/woff2\"}]\n2:HL[\"/_next/static/css/2eb10676cf259d3f.css\",\"style\",{\"crossOrigin\":\"\"}]\n0:\"$L3\"\n"])</script><script>self.__next_f.push([1,"4:I[2478,[],\"\"]\n6:I[2280,[],\"\"]\n7:I[4336,[\"39\",\"static/chunks/39-cefea7e4f434356b.js\",\"185\",\"static/chunks/app/layout-2a9799121329ca53.js\"],\"ThemeProvider\"]\n8:I[3386,[\"39\",\"static/chunks/39-cefea7e4f434356b.js\",\"185\",\"static/chunks/app/layout-2a9799121329ca53.js\"],\"\"]\n9:I[6039,[\"39\",\"static/chunks/39-cefea7e4f434356b.js\",\"931\",\"static/chunks/app/page-401250cce1be0565.js\"],\"\"]\na:I[1974,[],\"\"]\nb:I[6496,[],\"\"]\n"])</script><script>self.__next_f.push([1,"3:[[[\"$\",\"link\",\"0\",{\"rel\":\"stylesheet\",\"href\":\"/_next/static/css/2eb10676cf259d3f.css\",\"precedence\":\"next\",\"crossOrigin\":\"\"}]],[\"$\",\"$L4\",null,{\"buildId\":\"PWEdH4xjP9aCV2hKPEY47\",\"assetPrefix\":\"\",\"initialCanonicalUrl\":\"/posts/webpack-splitchunks\",\"initialTree\":[\"\",{\"children\":[\"posts\",{\"children\":[[\"slug\",\"webpack-splitchunks\",\"c\"],{\"children\":[\"__PAGE__?{\\\"slug\\\":[\\\"webpack-splitchunks\\\"]}\",{}]}]}]},\"$undefined\",\"$undefined\",true],\"initialHead\":[false,\"$L5\"],\"globalErrorComponent\":\"$6\",\"children\":[null,[\"$\",\"html\",null,{\"lang\":\"en\",\"suppressHydrationWarning\":true,\"children\":[[\"$\",\"title\",null,{\"children\":\"hai-x\"}],[\"$\",\"body\",null,{\"children\":[\"$\",\"$L7\",null,{\"attribute\":\"class\",\"children\":[\"$\",\"div\",null,{\"className\":\"antialiased min-h-screen bg-white text-slate-900 __className_d65c78\",\"children\":[\"$\",\"div\",null,{\"className\":\"max-w-2xl mx-auto py-10 px-4\",\"children\":[[\"$\",\"header\",null,{\"children\":[\"$\",\"div\",null,{\"className\":\"flex items-center justify-between\",\"children\":[[\"$\",\"$L8\",null,{}],[\"$\",\"nav\",null,{\"className\":\"ml-auto text-sm font-medium space-x-6\",\"children\":[[\"$\",\"$L9\",null,{\"href\":\"/\",\"children\":\"Home\"}],[\"$\",\"$L9\",null,{\"href\":\"/about\",\"children\":\"About\"}]]}]]}]}],[\"$\",\"main\",null,{\"children\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":[[\"$\",\"title\",null,{\"children\":\"404: This page could not be found.\"}],[\"$\",\"div\",null,{\"style\":{\"fontFamily\":\"system-ui,\\\"Segoe UI\\\",Roboto,Helvetica,Arial,sans-serif,\\\"Apple Color Emoji\\\",\\\"Segoe UI Emoji\\\"\",\"height\":\"100vh\",\"textAlign\":\"center\",\"display\":\"flex\",\"flexDirection\":\"column\",\"alignItems\":\"center\",\"justifyContent\":\"center\"},\"children\":[\"$\",\"div\",null,{\"children\":[[\"$\",\"style\",null,{\"dangerouslySetInnerHTML\":{\"__html\":\"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}\"}}],[\"$\",\"h1\",null,{\"className\":\"next-error-h1\",\"style\":{\"display\":\"inline-block\",\"margin\":\"0 20px 0 0\",\"padding\":\"0 23px 0 0\",\"fontSize\":24,\"fontWeight\":500,\"verticalAlign\":\"top\",\"lineHeight\":\"49px\"},\"children\":\"404\"}],[\"$\",\"div\",null,{\"style\":{\"display\":\"inline-block\"},\"children\":[\"$\",\"h2\",null,{\"style\":{\"fontSize\":14,\"fontWeight\":400,\"lineHeight\":\"49px\",\"margin\":0},\"children\":\"This page could not be found.\"}]}]]}]}]],\"notFoundStyles\":[],\"childProp\":{\"current\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\",\"posts\",\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":\"$undefined\",\"notFoundStyles\":\"$undefined\",\"childProp\":{\"current\":[\"$\",\"$La\",null,{\"parallelRouterKey\":\"children\",\"segmentPath\":[\"children\",\"posts\",\"children\",[\"slug\",\"webpack-splitchunks\",\"c\"],\"children\"],\"loading\":\"$undefined\",\"loadingStyles\":\"$undefined\",\"hasLoading\":false,\"error\":\"$undefined\",\"errorStyles\":\"$undefined\",\"template\":[\"$\",\"$Lb\",null,{}],\"templateStyles\":\"$undefined\",\"notFound\":\"$undefined\",\"notFoundStyles\":\"$undefined\",\"childProp\":{\"current\":[\"$Lc\",\"$Ld\",null],\"segment\":\"__PAGE__?{\\\"slug\\\":[\\\"webpack-splitchunks\\\"]}\"},\"styles\":[]}],\"segment\":[\"slug\",\"webpack-splitchunks\",\"c\"]},\"styles\":[]}],\"segment\":\"posts\"},\"styles\":[]}]}],[\"$\",\"footer\",null,{\"className\":\"mt-8\",\"children\":[[\"$\",\"hr\",null,{\"className\":\"my-4\"}],[\"$\",\"small\",null,{\"className\":\"flex justify-end \",\"children\":[\"$\",\"nav\",null,{\"className\":\"underline decoration-1\",\"children\":[[\"$\",\"$L9\",null,{\"href\":\"https://github.com/hai-x\",\"className\":\"mr-3\",\"children\":\"@github\"}],[\"$\",\"$L9\",null,{\"href\":\"https://twitter.com/__haijie\",\"children\":\"@twitter\"}]]}]}]]}]]}]}]}]}]]}],null]}]]\n"])</script><script>self.__next_f.push([1,"e:T4f7,"])</script><script>self.__next_f.push([1,"const chunksInfoMap = new Map()\n\nconst addModuleToChunksInfoMap = (\n  cacheGroup,\n  cacheGroupIndex,\n  selectedChunks,\n  selectedChunksKey,\n  module\n) =\u003e {\n  // Break if minimum number of chunks is not reached\n  if (selectedChunks.length \u003c cacheGroup.minChunks) return\n  // Determine name for split chunk\n  const name = cacheGroup.getName(module, selectedChunks, cacheGroup.key)\n  // Create key for maps\n  // When it has a name we use the name as key\n  // Elsewise we create the key from chunks and cache group key\n  // This automatically merges equal names\n  const key =\n    cacheGroup.key + (name ? ` name:${name}` : ` chunks:${selectedChunksKey}`)\n  // Add module to maps\n  let info = chunksInfoMap.get(key)\n  if (info === undefined) {\n    chunksInfoMap.set(\n      key,\n      (info = {\n        modules: new SortableSet(undefined, sortByIdentifier),\n        cacheGroup,\n        cacheGroupIndex,\n        name,\n        size: 0,\n        chunks: new Set(),\n        reuseableChunks: new Set(),\n        chunksKeys: new Set()\n      })\n    )\n  }\n  info.modules.add(module)\n  info.size += module.size()\n  if (!info.chunksKeys.has(selectedChunksKey)) {\n    info.chunksKeys.add(selectedChunksKey)\n    for (const chunk of selectedChunks) {\n      info.chunks.add(chunk)\n    }\n  }\n}\n"])</script><script>self.__next_f.push([1,"f:T541,"])</script><script>self.__next_f.push([1,"const compareEntries = (a, b) =\u003e {\n  // 1. by priority\n  const diffPriority = a.cacheGroup.priority - b.cacheGroup.priority\n  if (diffPriority) return diffPriority\n  // 2. by number of chunks\n  const diffCount = a.chunks.size - b.chunks.size\n  if (diffCount) return diffCount\n  // 3. by size reduction\n  const aSizeReduce = a.size * (a.chunks.size - 1)\n  const bSizeReduce = b.size * (b.chunks.size - 1)\n  const diffSizeReduce = aSizeReduce - bSizeReduce\n  if (diffSizeReduce) return diffSizeReduce\n  // 4. by cache group index\n  const indexDiff = a.cacheGroupIndex - b.cacheGroupIndex\n  if (indexDiff) return indexDiff\n  // 5. by number of modules (to be able to compare by identifier)\n  const modulesA = a.modules\n  const modulesB = b.modules\n  const diff = modulesA.size - modulesB.size\n  if (diff) return diff\n  // 6. by module identifiers\n  modulesA.sort()\n  modulesB.sort()\n  const aI = modulesA[Symbol.iterator]()\n  const bI = modulesB[Symbol.iterator]()\n  // eslint-disable-next-line no-constant-condition\n  while (true) {\n    const aItem = aI.next()\n    const bItem = bI.next()\n    if (aItem.done) return 0\n    const aModuleIdentifier = aItem.value.identifier()\n    const bModuleIdentifier = bItem.value.identifier()\n    if (aModuleIdentifier \u003e bModuleIdentifier) return -1\n    if (aModuleIdentifier \u003c bModuleIdentifier) return 1\n  }\n}\n"])</script><script>self.__next_f.push([1,"d:[\"$\",\"article\",null,{\"className\":\"py-6 prose dark:prose-invert\",\"children\":[[\"$\",\"h1\",null,{\"className\":\"mb-4 break-all\",\"children\":\"webpack@4 optimization.splitChunks\"}],[\"$\",\"p\",null,{\"className\":\"text-slate-700\",\"children\":\"webpack@4 optimization.splitChunks\"}],[\"$\",\"hr\",null,{\"className\":\"my-6\"}],[[\"$\",\"blockquote\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"本文将展开分析 webpack@4 内的优化项 SplitChunks, 注意 SplitChunks 和 Code Splitting 有所不同, 常说的 Code Splitting 一般指代码分割, 通过 动态导入 dynamic import() 实现。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"希望读者们能在阅读后学到东西, 同时 遇到疏漏/问题, 也请进行指正。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"相关代码: \",[\"$\",\"a\",null,{\"href\":\"https://github.com/haijie-x/webpack-split-chunks-demo\",\"children\":\"github/webpack-split-chunks-demo\"}]]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"名词解释\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":[\"Chunk: 由 modules 集合 + modules 加载后会执行的方法 组成 , 可理解为 构建输出的 js 产物。\\n\",[\"$\",\"code\",null,{\"children\":\"Each chunk has a corresponding asset. The assets are the output files - the result of bundling.\"}]]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"chunk 如何产生？\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"Entry Points (webpack config entry 配置项)\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// webpack.config.js\\nmodule.exports = {\\n  entry: './path/to/my/entry/file.js'\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"动态导入语句\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"import('./path/to/my/entry/file.js')\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"chunk 如何执行？\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// 模拟下 module system 里的 jsonp 方法, jsonp 具体做 缓存模块 + 执行模块\\n// require 等实现不做展开\\nwindow.mock_jsonp(\\n  // chunk id\\n  '0',\\n  // chunk 包含的模块集合\\n  {\\n    0: (module, exports, require) =\u003e {\\n      console.log(`entry module`)\\n    }\\n  },\\n  // 执行 mock_jsonp 方法时, 将执行该函数\\n  (require) =\u003e {\\n    require(0)\\n  }\\n)\\n\"}]}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"SplitChunks: 中文为 拆分 chunks, 拆分前 chunk-1 到 拆分后 chunk-1-1, chunk-1-2…\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"大多数情况下 chunks 的拆分 意味着 modules 的合并, 所以对 chunks 进行拆分 与 module 的关系密不可分。\"}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"用途\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"随着业务规模/复杂度上升, Webapp 项目的体积也越来越大, 对于用户而言, 页面首屏加载速度尤为关键, 加载依赖网络, 开发者需要构建出一个适配不同网络情况/业务特性的应用产物。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"对于一些不支持 http2 的应用, 我们需限制首屏最大并行请求数量。但对于支持 http2 的应用, 我们需充分发挥多路复用的特性。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"对于用户流量大 \u0026 需求经常迭代变更的应用, 每次发版, 相关改动的 bundle 都将变成冷资源, 热起来需一段时间, 故需「擅用缓存」, 从构建层面, 开发者可以辅助用户「使用缓存」, 如 chunkHash/contentHash, hashModule, 将不经常变更三方依赖抽离成单独的 vendor chunk, 将 体积较大的三方依赖 \u0026 几乎不变更的依赖 (react/react-dom 等)做 external。\"}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"常用配置项\"}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"chunks : 规定了什么类型的 chunk 将被拆分, 可选 all , initial, async, 其中 initial 由 EntryPoints 产生, async 由 dyn import() 产生, all 则表示所有 chunk 都可被拆分。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"name: 规定拆分后的 chunk 的名称。应避免使用常量字符串 or 返回相同的字符串, 若 cacheGroup 未指定 name , 这将导致不同的 cacheGroup 使用相同 name, 最终导致所有模块合并到 同一个 chunk 中。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"maxAsyncRequests: 动态加载 最大的并行请求数。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"maxInitialRequests: 首屏加载 最大的并行请求数。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"minChunks: 规定了拆分前的模块至少存在几个 chunk 内。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"minSize: 规定了拆分后的 chunk 最小体积。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"maxSize: 规定了拆分后的 chunk 最大体积, 该规则可能会被打破（为何会被打破, 下文分析会讲解）。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"cacheGroup: 定义单个 chunk 的拆分规则, 会继承, 覆盖 splitChunks.* 的任何选项, 额外多出 test, priority 和 reuseExistingChunk 属性。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"test: 模块匹配规则\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"priority: 组别优先级, 如开发者新增一个组别来匹配 node_modules 里具体的某些模块, 同时 webpack 内部有 vender 组别, 开发者可通过 priority 属性提升优先级进行拆分。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"reuseExistingChunk: 是否复用已有 chunk, splitChunks 默认行为是通过 addChunk() 新增 chunk, 若拆分出的 chunk 的模块集合 === 已有 chunk 的模块集合, 则不新增, 相当于 「拆了个寂寞」。\"}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"如何配置\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"选择默认配置是为了适应 Web 性能最佳实践, 但您的项目的最佳策略可能有所不同。如果您要更改配置, 则应该衡量更改的效果, 以确保带来真正的好处。\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"默认预设\"}],\"\\n\"]}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"webpack 4: https://v4.webpack.js.org/plugins/split-chunks-plugin/#optimizationsplitchunks\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"webpack 5: https://webpack.js.org/plugins/split-chunks-plugin/#optimizationsplitchunks\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"$\",\"a\",null,{\"href\":\"https://github.com/vercel/next.js/blob/f85d3af12d693ebed85f511f8b9f1484a71e75f0/packages/next/src/build/webpack-config.ts#L901%5D\",\"children\":\"nextjs\"}]}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"思考\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"拆分 chunks 由构建工具完成, 这在用户侧是如何表现的？\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// main.js\\nimport(\\n  /* webpackChunkName:\\n\\\"async-a\\\" */ './a'\\n)\\n\\n// a.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// 30KB.js\\n// ...\\n// 30KB 字符串, 这里不展开\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"$\",\"strong\",null,{\"children\":\"使用 webpack 默认配置, 会将 node_modules 的模块拆分到新 chunk 内。\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"构建产物如下\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"async-a.chunk.js\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"main.js\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"vendors~async-a.chunk.js\"}],\"\\n\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// main.js\\n\\n// ...\\nPromise.all(\\n  /* import() | async-a */ [\\n    __webpack_require__.e(0),\\n    __webpack_require__.e(1)\\n  ]\\n).then(__webpack_require__.bind(null, 1))\\n// ...\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"webpack_require.e 内部维护了一个 chunkId -\u003e url 的 map 来动态加载 script 脚本, 函数返回一个 Promise , 这里不做具体展开。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"源码中对 async-a 模块的加载执行, 被编译为同时加载 2 个 chunk（async-a + vendor）后 执行 async-a 模块。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"$\",\"strong\",null,{\"children\":\"如何确保「拆分」不影响原有的 chunkGraph 各个 chunk 节点关系？\"}]}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"webpack4 之前 「父 chunk → 子 chunk 」关系\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"webpack4 及之后「父 chunkGroup(chunks 集合) → 子 chunkGroup(chunks 集合) 」关系\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"$\",\"strong\",null,{\"children\":\"为什么要对数据结构进行优化？采用 chunksGroup, 而不是 chunk?\"}]}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"如果 依赖关系是 chunk-a → chunk-b（chunk b 依赖 chunk a）, 从 chunk-a 拆分出 chunk-a-a。此时将面临一个问题: chunk-a-a 该作为 chunk-a 的父还是子？父子关系意味着模块加载的顺序, 比如 「chunk-a 的加载 依赖着 chunk-a-a 的加载」, 两者都将导致额外的性能开销, 即 并行加载 变成 串行加载。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"简单代码解释: \",[\"$\",\"code\",null,{\"children\":\"load(chunk-a).then(()⇒{load(chunk-a-a)})\"}]]}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"如果 依赖关系为 chunkGroup-a → chunkGroup-b（chunkGroup-b 依赖 chunkGroup-a）, 此时从 chunk-a 拆分出 chunk-a-a, 并不影响 chunkGroup 的依赖关系, 要做的只是往 chunk-a 所在的 chunkGroup.chunks 数组 push 进 chunk-a-a。chunkGroup.chunks 里的每个 chunk 仍并行加载。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"简单代码解释: \",[\"$\",\"code\",null,{\"children\":\"chunkGroup.chunks.forEach(load)\"}]]}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"$\",\"strong\",null,{\"children\":\"可见, 上文思考提到的内容, async-a + vendor 同属于 一个 chunkGroup。\"}]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// lib/RuntimeTemplate.js\\nblockPromise({ block, message }) {\\n    // ...\\n    const chunks = block.chunkGroup.chunks.filter(\\n            chunk =\u003e !chunk.hasRuntime() \u0026\u0026 chunk.id !== null\\n    );\\n    // ...\\n    if (chunks.length === 1) {\\n            const chunkId = JSON.stringify(chunks[0].id);\\n            return `__webpack_require__.e(${comment}${chunkId})`;\\n    } else if (chunks.length \u003e 0) {\\n            const requireChunkId = chunk =\u003e\\n                    `__webpack_require__.e(${JSON.stringify(chunk.id)})`;\\n            return `Promise.all(${comment.trim()}[${chunks\\n                    .map(requireChunkId)\\n                    .join(\\\", \\\")}])`;\\n    } else {\\n            return `Promise.resolve(${comment.trim()})`;\\n    }\\n}\\n\"}]}],\"\\n\",[\"$\",\"blockquote\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"https://medium.com/webpack/webpack-4-code-splitting-chunk-graph-and-the-splitchunks-optimization-be739a861366\"}],\"\\n\"]}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"前置了解\"}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"功能的输入和输出都为 chunks, 输入的 chunks 是基于模块依赖关系初步形成的。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"一个模块可能命中多个 cacheGroups, 最终通过 priority , test 等属性, 决定模块处于哪个 cacheGroups 中, 即模块被拆分到 哪个 chunk 中。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"单个 module 实例 记录了其所在的所有 chunks 集合。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"单个 chunk 实例 记录了其包含的所有 module 集合与 其所在的所有 chunkGroups 集合。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"简略设计\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"思考一下 如果目标是 「将命中 \",[\"$\",\"code\",null,{\"children\":\"splitChunks.cacheGroups.{cacheGroup}.test\"}],\" 的模块 都抽离到 新 chunk 内」, 我们需要怎么做？\"]}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"首先, 找到 所有匹配中的模块, 并依次找到 模块所在的 chunks 集合, 若模块被复用, 则 chunks 长度 大于等于 1。（以下的 chunks 指 模块所在的 chunks 集合）\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"判断 chunks 的长度是否 大于等于 minChunk, 若不满足, 则过滤该模块（表示 \u003c minChunk 的 chunk 数量 依赖此模块）。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"判断 剩余模块的总体积 是否 大于等于 minSize, 若不满足, 则退出功能。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"判断 是否能复用已有 chunk（判断依据为 是否存在一个 chunk 包含所有剩余模块）, 若不满足, 则后续会新增 chunk, 否则复用 chunk（即新 chunk 为自身）。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"判断 每个 chunk 实例所在的每个 chunkGroups 中的 chunks[] 数量 是否有 \u003c maxRequest, 若不满足, 则过滤该 chunk（表示 存在某个 import/entry 会导致 大于等于 maxRequest 的 js 请求数）。（以下的 chunkGroups 指 chunk 实例所在的 chunkGroups 集合）\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"再次判断 chunks 的长度是否 大于等于 minChunk, 若不满足, 则过滤该模块。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"遍历剩余模块: 模块所在 chunk 实例中 记录的模块集合中, 删除模块自身, 同时向所在的 chunkGroups 中添加 新 chunk, 并向 新 chunk 添加该模块。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"判断 chunk 的总体积 是否 \u003c maxSize, 若不满足, 则对 新 chunk 进行拆分。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"至此所有拆分规则皆满足, 且 新 chunk 已存在。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"深入源码\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"让我们深入下 webpack （v4.44.2）如何实现 splitChunks 功能？\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// lib/optimize/SplitChunksPlugin.js\\nmodule.exports = class SplitChunksPlugin {\\n  apply(compiler) {\\n    compiler.hooks.thisCompilation.tap('SplitChunksPlugin', (compilation) =\u003e {\\n      let alreadyOptimized = false\\n      compilation.hooks.unseal.tap('SplitChunksPlugin', () =\u003e {\\n        alreadyOptimized = false\\n      })\\n      compilation.hooks.optimizeChunksAdvanced.tap(\\n        'SplitChunksPlugin',\\n        (chunks) =\u003e {\\n          // ...\\n        }\\n      )\\n    })\\n  }\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"向 optimizeChunksAdvanced 事件钩子注册事件, 并接收到初步形成的 chunks。设立标志位 alreadyOptimized 避免重复执行功能, 除非编译阶段接收到新模块。\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"const indexMap = new Map()\\nlet index = 1\\nfor (const chunk of chunks) {\\n  indexMap.set(chunk, index++)\\n}\\nconst chunkSetsInGraph = new Map()\\nfor (const module of compilation.modules) {\\n  const chunksKey = getKey(module.chunksIterable)\\n  if (!chunkSetsInGraph.has(chunksKey)) {\\n    chunkSetsInGraph.set(chunksKey, new Set(module.chunksIterable))\\n  }\\n}\\nconst chunkSetsByCount = new Map()\\nfor (const chunksSet of chunkSetsInGraph.values()) {\\n  const count = chunksSet.size\\n  let array = chunkSetsByCount.get(count)\\n  if (array === undefined) {\\n    array = []\\n    chunkSetsByCount.set(count, array)\\n  }\\n  array.push(chunksSet)\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"初始化 三个数据结构 indexMap / chunkSetsInGraph / chunkSetsByCount\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":[\"indexMap 维护 chunk 到 index 的映射。 \",[\"$\",\"code\",null,{\"children\":\"{ chunk-a ⇒ 0, chunk-b ⇒ 1, … }\"}]]}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"chunkSetsInGraph 维护 chunksKey 到 chunks 集合 的映射。chunk 集合 指 模块所在的所有 chunks 集合。如 module-a 被 chunk-a, chunk-b, chunk-c 依赖, 则 module-a 的 chunks 集合为 [chunk-a, chunk-b, chunk-c] , chunksKey 由 这些 chunk 对应的 index 拼接而成。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"补充: ”module-a 被 chunk-a, chunk-b, chunk-c 依赖” 可能有些难懂, 以下模拟过程简单解释下。\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// 源代码\\n// a.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// b.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// c.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// main.js\\nimport(\\n  /* webpackChunkName:\\n\\\"async-a\\\" */ './a'\\n)\\nimport(\\n  /* webpackChunkName:\\n\\\"async-b\\\" */ './b'\\n)\\nimport(\\n  /* webpackChunkName:\\n\\\"async-c\\\" */ './c'\\n)\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"拆分前的构建产物如下\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"main.js\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"async-a.chunk.js 包含的模块 「30KB 」\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"async-b.chunk.js 包含的模块 「30KB」\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"async-c.chunk.js 包含的模块 「30KB 」\"}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"此时 我们可以认为 模块 「30KB 」被 [ async-a.chunk.js, async-b.chunk.js, async-c.chunk.js ] 依赖。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"chunkSetsByCount 维护 chunks 集合个数 到 chunks 集合 的映射。主要作用 是为了后续找到「所有可拆分的 chunks 组合」\"}],\"\\n\"]}],\"\\n\"]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// Create a list of possible combinations\\nconst combinationsCache = new Map() // Map\u003cstring, Set\u003cChunk\u003e[]\u003e\\n\\nconst getCombinations = (key) =\u003e {\\n  const chunksSet = chunkSetsInGraph.get(key)\\n  var array = [chunksSet]\\n  if (chunksSet.size \u003e 1) {\\n    for (const [count, setArray] of chunkSetsByCount) {\\n      // \\\"equal\\\" is not needed because they would have been merge in the first step\\n      if (count \u003c chunksSet.size) {\\n        for (const set of setArray) {\\n          if (isSubset(chunksSet, set)) {\\n            array.push(set)\\n          }\\n        }\\n      }\\n    }\\n  }\\n  return array\\n}\\n// ...\\n// Prepare some values\\nfor (const module of compilation.modules) {\\n  // ...\\n  const chunksKey = getKey(module.chunksIterable)\\n  let combs = combinationsCache.get(chunksKey)\\n  if (combs === undefined) {\\n    combs = getCombinations(chunksKey)\\n    combinationsCache.set(chunksKey, combs)\\n  }\\n  // ...\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"getCombinations 方法通过 chunkSetsByCount 找到 所有「可拆分 chunks 组合」并缓存到 combinationsCache 中。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"比如 module-a 被 chunk-a, chunk-b, chunk-c 依赖, module-b 被 chunk-b, chunk-c 依赖。那么对于 module-a, 拆分组合为 \",[\"$\",\"code\",null,{\"children\":\"{ chunk-a, chunk-b, chunk-c } , { chunk-b, chunk-c }\"}]]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"思考:\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":[\"$\",\"strong\",null,{\"children\":\"为什么要找到所有可拆分 chunks 的组合？\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"设想场景:\"}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"module-a 从 chunk-a, chunk-b, chunk-c 拆出。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"chunk-c 所在 chunkGroups 的 chunks 集合为 3。\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"设置规则 maxRequest = 3。\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"该组合将违反了 maxRequest 规则, 该组合将被舍弃。但可满足「 组合二 module-a 从 chunk-a, chunk-b 拆出」。\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"$e\"}]}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"for (const module of compilation.modules) {\\n  // ...\\n  // For all combination of chunk selection\\n  for (const chunkCombination of combs) {\\n    // Break if minimum number of chunks is not reached\\n    if (chunkCombination.size \u003c cacheGroup.minChunks) continue\\n    // Select chunks by configuration\\n    const { chunks: selectedChunks, key: selectedChunksKey } =\\n      getSelectedChunks(chunkCombination, cacheGroup.chunksFilter)\\n\\n    addModuleToChunksInfoMap(\\n      cacheGroup,\\n      cacheGroupIndex,\\n      selectedChunks,\\n      selectedChunksKey,\\n      module\\n    )\\n  }\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"通过 getSelectedChunks 方法筛选有哪些 chunks 可被拆分, 这里使用到了 splitChunks.chunks 值做过滤。若 chunks 配置为 “all”, 则所有 chunks 都可被选择。若 chunks 配置为 “async”, 则只能拆分 async 类型的 chunk。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"通过 addModuleToChunksInfoMap 方法去初始化 chunksInfoMap, addModuleToChunksInfoMap 算是整个源码中较为重要的函数, 上文提到 combinationsCache 存放的是所有「可拆分的 chunks 组合」, 这里的 chunksInfoMap 存放的就是所有「拆分组合」, 它将 modules, chunks, cacheGroup 都链接在一起。\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"可能还是有些晦涩难懂, 这里以上文提到的例子展开讲解下。\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"// 源代码\\n// a.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// b.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// c.js\\nimport bigFile from '30KB'\\nconsole.log(bigFile)\\n\\n// main.js\\nimport(\\n  /* webpackChunkName:\\n\\\"async-a\\\" */ './a'\\n)\\nimport(\\n  /* webpackChunkName:\\n\\\"async-b\\\" */ './b'\\n)\\nimport(\\n  /* webpackChunkName:\\n\\\"async-c\\\" */ './c'\\n)\\n\\n// webpack.config.js 采用默认的 splitChunks 配置\\nmodule.exports = {\\n  //...\\n  optimization: {\\n    splitChunks: {\\n      chunks: 'async',\\n      minSize: 30000,\\n      maxSize: 0,\\n      minChunks: 1,\\n      maxAsyncRequests: 5,\\n      maxInitialRequests: 3,\\n      automaticNameDelimiter: '~',\\n      automaticNameMaxLength: 30,\\n      name: true,\\n      cacheGroups: {\\n        vendors: {\\n          test: /[\\\\\\\\/]node_modules[\\\\\\\\/]/,\\n          priority: -10\\n        },\\n        default: {\\n          minChunks: 2,\\n          priority: -20,\\n          reuseExistingChunk: true\\n        }\\n      }\\n    }\\n  }\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"以上存在两个 cacheGroups, 显然「30KB」模块皆命中, 所有拆分组合都被列举出来了, 最终形成的 chunksInfoMap 结果如下:\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"{\\n\\t'default name:async-a~async-b~async-c': {\\n\\t\\tchunks:[async-a,async-b,async-c],\\n\\t\\tcacheGroup: default,\\n\\t\\tmodules:[30KB],\\n\\t\\tsize:30833\\n\\t\\t// ...\\n\\t}\\n\\t'vendors name:vendors~async-a~async-b~async-c':{\\n\\t\\tchunks:[async-a,async-b,async-c],\\n\\t\\tcacheGroup: vendor,\\n\\t\\tmodules:[30KB],\\n\\t\\tsize:30833\\n\\t\\t// ...\\n\\t},\\n\\t'vendors name:vendors~async-a':{\\n\\t\\tchunks:[async-a],\\n\\t\\tcacheGroup: vendor,\\n\\t\\tmodules:[30KB],\\n\\t\\tsize:30833\\n\\t\\t// ...\\n\\t},\\n\\t'vendors name:vendors~async-b':{\\n\\t\\tchunks:[async-b],\\n\\t\\tcacheGroup: vendor,\\n\\t\\tmodules:[30KB],\\n\\t\\tsize:30833\\n\\t\\t// ...\\n\\t},\\n\\t'vendors name:vendors~async-c':{\\n\\t\\tchunks:[async-c],\\n\\t\\tcacheGroup: vendor,\\n\\t\\tmodules:[30KB],\\n\\t\\tsize:30833\\n\\t\\t// ...\\n\\t}\\n}\\n\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"最重要的 chunksInfoMap 数据结构介绍完毕, 后续便是 遍历 chunksInfoMap 每次选择最优的一项 进行拆分。那么如何判断「最优」？\"}],\"\\n\",[\"$\",\"pre\",null,{\"children\":[\"$\",\"code\",null,{\"className\":\"language-javascript\",\"children\":\"$f\"}]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"依次比较\"}],\"\\n\",[\"$\",\"ol\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":\"priority\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"chunks 数量\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"总体积减少大小（比如 组合 A 和 组合 B 拆分出的 chunk 体积都为 30833, 组合 A 从 2 个 chunk 拆出, 组合 B 从 3 个 chunk 拆出, 所以组合 B 「总体积减少 」大于 组合 A「总体积减少 」, 则最优解是 组合 B）\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"cacheGroups 索引位置\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"包含的 module 集合长度\"}],\"\\n\",[\"$\",\"li\",null,{\"children\":\"两个组合内 每一个 module id 字符串\"}],\"\\n\"]}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"每次遍历 都找到了最优的拆分组合, 后续就要进行 拆分判断 \u0026 具体拆分动作了。这一部分已在上节「简略设计」中讲述, 后续源码就不再展开讲解了。\"}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"总结\"}],\"\\n\",[\"$\",\"p\",null,{\"children\":\"Webpack v4.44.2 版本的 SplitChunks 插件源码共 1k 行, 加上近 300 行的 deterministicGroupingForModules maxSize 拆分算法, 为 webapp 应用的性能优化提供了较为优秀的解决方案。再次感叹 webpack 的强大。\"}],\"\\n\",[\"$\",\"h3\",null,{\"children\":\"相关文章\"}],\"\\n\",[\"$\",\"ul\",null,{\"children\":[\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"https://medium.com/webpack/webpack-4-code-splitting-chunk-graph-and-the-splitchunks-optimization-be739a861366\"}],\"\\n\"]}],\"\\n\",[\"$\",\"li\",null,{\"children\":[\"\\n\",[\"$\",\"p\",null,{\"children\":\"https://web.dev/articles/granular-chunking-nextjs\"}],\"\\n\"]}],\"\\n\"]}]]]}]\n"])</script><script>self.__next_f.push([1,"5:[[\"$\",\"meta\",\"0\",{\"charSet\":\"utf-8\"}],[\"$\",\"title\",\"1\",{\"children\":\"webpack@4 optimization.splitChunks\"}],[\"$\",\"meta\",\"2\",{\"name\":\"description\",\"content\":\"webpack@4 optimization.splitChunks\"}],[\"$\",\"meta\",\"3\",{\"name\":\"viewport\",\"content\":\"width=device-width, initial-scale=1\"}],[\"$\",\"meta\",\"4\",{\"name\":\"next-size-adjust\"}]]\nc:null\n"])</script></body></html>
